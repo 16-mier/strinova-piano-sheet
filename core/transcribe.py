@@ -281,7 +281,7 @@ def refine_onsets(a: np.ndarray, onsets, rate: int,
 
 
 def estimate_f0_peak_ex(seg: np.ndarray, rate: int,
-                        ratio: float = 0.15,
+                        ratio: float = 0.35,
                         fmin: float = 105.0) -> tuple[float, float]:
     """返回 (基频, **谱峰突出度 dB**)。
 
@@ -295,6 +295,13 @@ def estimate_f0_peak_ex(seg: np.ndarray, rate: int,
       起音包络（快起音 + 指数衰减）本身会在极低频堆出能量，
       实测把 `1` 测成了 67.8Hz（正好一半）。卡在 105 就干净了，
       同时给整体降调的录音留了 20% 余量。
+
+    ★ ratio 为什么是 0.35（而不是 0.15）★
+      琴音衰减慢，**前一个音在 90ms 后还剩 20~30% 的幅度**。
+      阈值定 0.15 的话它的尾巴照样算"够强的峰"，而"最低的那根柱子"
+      自然就挑中了前一个音 —— 实测快速弹 `5' 6' 7'` 时
+      第三个音老是被认成 `6'`（前一个音）。抬到 0.35 就把它滤掉了：
+      我们要找的本来就是**基频**（每段里最强的那根），不怕阈值高。
     """
     x = np.asarray(seg, dtype=np.float64)
     if x.ndim > 1:
@@ -335,7 +342,7 @@ def estimate_f0_peak_ex(seg: np.ndarray, rate: int,
 
 
 def estimate_f0_peak(seg: np.ndarray, rate: int,
-                     ratio: float = 0.15,
+                     ratio: float = 0.35,
                      fmin: float = 105.0) -> float:
     """估基频：幅度谱里**最低的那根够强的柱子**。
 

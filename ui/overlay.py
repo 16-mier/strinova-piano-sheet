@@ -217,8 +217,12 @@ class OverlayWindow(QWidget):
 
     # ---- 实时跟弹的高亮 ----
 
-    def flash_note(self, pitch: str, seconds: float = 0.7):
-        """游戏里敲了哪个键，就在浮窗上亮哪个。"""
+    def flash_note(self, pitch: str, seconds: float = 0.35):
+        """游戏里敲了哪个键，就在浮窗上亮哪个。
+
+        时长不宜长：弹得快的时候（90ms 一个音）如果亮 0.7 秒，
+        屏幕上会同时挂着七八个高亮，看着像是"按了 A 却亮了 B"。
+        """
         self.grid_view.set_flash(pitch, seconds)
         if not self._flash_tick.isActive():
             self._flash_tick.start()

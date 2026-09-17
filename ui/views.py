@@ -9,6 +9,7 @@ GridView  跟游戏里那台琴的排列一模一样；当前该打的键亮黄�
 
 from __future__ import annotations
 
+import math
 import time
 
 from PyQt6.QtCore import QRectF, Qt
@@ -19,6 +20,15 @@ from core import layout
 from core.timeline import Timeline
 
 from . import theme as T
+
+
+def _pf(pitch: str) -> float:
+    """键名 -> 频率（判断"是不是同一个音高"用）。"""
+    from core.transcribe import pitch_freq
+    try:
+        return pitch_freq(pitch)
+    except Exception:
+        return 1.0
 
 
 class SheetView(QWidget):
@@ -86,10 +96,19 @@ class SheetView(QWidget):
 
     # ---- 实时跟弹的高亮 ----
 
-    def set_flash(self, pitch: str, seconds: float = 0.7):
-        """让某个键亮一下 —— 游戏里敲了哪个就亮哪个。"""
+    def set_flash(self, pitch: str, seconds: float = 0.35):
+        """让某个键亮一下 —— 游戏里敲了哪个就亮哪个。
+
+        ★ 顺便把**同音高的另一个键**的残留高亮清掉 ★
+          `8` 和 `1'` 是同一个音高：上一个亮的是 `1'`、这次识别成 `8`，
+          两个格子会同时亮着，看着就像"按错了"。
+        """
         if not pitch:
             return
+        for other in list(self.flash):
+            if other != pitch and abs(1200.0 * math.log2(
+                    _pf(other) / _pf(pitch))) < 30.0:
+                del self.flash[other]
         self.flash[pitch] = time.monotonic() + max(0.1, float(seconds))
         self._last_key = None
         self.update()
@@ -237,7 +256,7 @@ class GridView(SheetView):
             if pcell is None:
                 continue
             prow, pcol = pcell
-            k = min(1.0, left / 0.7)
+            k = min(1.0, left / 0.35)
             fx = ox + pcol * (cell + T.GAP)
             fy = oy + (3 - prow) * (cell + T.GAP)
             fr = QRectF(fx, fy, cell, cell).adjusted(

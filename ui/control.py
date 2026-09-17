@@ -422,6 +422,20 @@ class ControlWindow(QMainWindow):
         prow3.addWidget(btn_corner)
         fg.addLayout(prow3)
 
+        # 方向键微调 —— 鼠标拖不动时的可靠替代（游戏里鼠标被抓走也照样能用）
+        nrow = QHBoxLayout()
+        nrow.addWidget(QLabel('微调'))
+        for label, ddx, ddy in (('←', -5, 0), ('↑', 0, -5),
+                                ('↓', 0, 5), ('→', 5, 0)):
+            nb = QPushButton(label)
+            nb.setFixedSize(36, 28)
+            nb.setToolTip('每次挪 5 像素（按住连点也行）')
+            nb.clicked.connect(
+                lambda _=False, a=ddx, c=ddy: self._nudge_overlay(a, c))
+            nrow.addWidget(nb)
+        nrow.addStretch(1)
+        fg.addLayout(nrow)
+
         self.lbl_tip = QLabel('提示：谱面窗平时是「鼠标穿透」的，枪能直接打过去；'
                               '要挪位置就勾上左边这个开关 —— 然后鼠标移到浮窗上，'
                               '等它变成四向箭头，按住就能拖。'
@@ -1268,6 +1282,15 @@ class ControlWindow(QMainWindow):
         self._set_geom_silent(round(gx + self._pin_x * gw),
                               round(gy + self._pin_y * gh),
                               self.sp_w.value(), self.sp_h.value())
+
+    def _nudge_overlay(self, dx: int, dy: int):
+        """按像素微调浮窗位置。
+
+        为什么要这个：游戏抢着鼠标的时候，浮窗上的鼠标拖动不一定抓得住；
+        但控制面板上的按钮永远点得到。
+        """
+        self.sp_x.setValue(self.sp_x.value() + dx)
+        self.sp_y.setValue(self.sp_y.value() + dy)
 
     def _snap_to(self, ax: float, ay: float):
         """贴到游戏窗口的锚点：左上 / 正中 / 右下 …"""

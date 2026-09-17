@@ -88,6 +88,31 @@ def main() -> int:
             print()
         return 0
 
+    if '--short' in sys.argv:
+        print('短窗口下的识别（模拟弹得快时只能取 84ms）—— 看低频键分不分得开')
+        print('-' * 78)
+        for wn_ms in (84, 120, 200):
+            wn = int(RATE * wn_ms / 1000)
+            bad = []
+            detail = []
+            for pitch, path in sorted(notes.items(),
+                                      key=lambda kv: T.pitch_freq(kv[0])):
+                a, _sr = audio_io.load_audio(path, target_sr=RATE)
+                if len(a) < wn:
+                    a = np.pad(a, (0, wn - len(a)))
+                seg = a[:wn]
+                got, freq, conf = T.match_key(seg, RATE)
+                f0, _db = T.estimate_f0_peak_ex(seg, RATE)
+                ok = (got == pitch or {got, pitch} == {'8', "1'"})
+                if not ok:
+                    bad.append('%s->%s' % (pitch, got))
+                detail.append('%s:%s(%.0fHz)' % (pitch, got or '?', f0))
+            print('窗口 %3dms  认错 %2d 个：%s' % (wn_ms, len(bad),
+                                                  ' '.join(bad)))
+            print('        %s' % '  '.join(detail))
+        print('-' * 78)
+        return 0
+
     print('共 %d 个采样' % len(notes))
     print('%-6s %9s %9s   %s' % ('键', 'HPS', '理论', '幅度谱前 6 个峰 (Hz)'))
     print('-' * 92)
