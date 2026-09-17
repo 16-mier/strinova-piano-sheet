@@ -72,15 +72,20 @@ KEY_FREQS: list[tuple[str, float]] = [
     (p, pitch_freq(p)) for p in layout.all_pitches()
 ]
 
-# 唯一音高表 —— 同音高的键只留一个代表（PAD 序号最小的那个）。
-# 游戏里 `8` 和 `1'` 是同一个音高的两个键，识别上天然分不开；
-# 与其每次随机挑一个，不如固定输出 `8`，这样谱面至少是稳定的。
+# 唯一音高表 —— 同音高的键只留一个代表。
+# 游戏里 `8` 和 `1'` 是同一个音高（都是 C4）的两个键，识别上天然分不开；
+# 这里统一取**带撇的那个**（`1'`），跟记谱语法和游戏里的说法一致。
 UNIQUE_KEYS: list[tuple[str, float]] = []
 for _p, _f in KEY_FREQS:
-    if any(abs(1200.0 * math.log2(_f / _g)) < 50.0
-           for _q, _g in UNIQUE_KEYS):
-        continue
-    UNIQUE_KEYS.append((_p, _f))
+    _hit = -1
+    for _i, (_q, _g) in enumerate(UNIQUE_KEYS):
+        if abs(1200.0 * math.log2(_f / _g)) < 50.0:
+            _hit = _i
+            break
+    if _hit < 0:
+        UNIQUE_KEYS.append((_p, _f))
+    elif "'" in _p and "'" not in UNIQUE_KEYS[_hit][0]:
+        UNIQUE_KEYS[_hit] = (_p, _f)
 
 
 @dataclass
@@ -227,16 +232,22 @@ def nearest_pitch(freq: float, offset_cents: float = 0.0) -> tuple[str, float]:
     """把频率匹配到琴上最近的键，返回 (音高, 偏差音分)。
 
     offset_cents = 已知的整体跑调量（正数 = 实测偏高）。
-    扣掉它之后再比，返回的也是扣掉之后的残差 —— 这样"整体升了 60 音分"
-    的录音不会被硬塞到隔壁键上去。
+
+    ★ 同频率的孪生键（`8` 和 `1'` 都是 C4）优先返回**带撇的那个** ★
+      游戏 UI 上那个键被作者改显示成 `8` 了，但记谱语法里一直写 `1'`，
+      用户也习惯看到 `1'`（见 DEVELOPMENT.md §2.2）。
     """
     if freq <= 0:
         return ('', 0.0)
     best_p, best_c = KEY_FREQS[0][0], 1e9
     for p, f in KEY_FREQS:
         c = 1200.0 * math.log2(freq / f) - offset_cents
-        if abs(c) < abs(best_c):
+        ac = abs(c)
+        if ac < abs(best_c) - 1e-9:
             best_p, best_c = p, c
+        elif (abs(ac - abs(best_c)) <= 1e-9
+              and "'" in p and "'" not in best_p):
+            best_p, best_c = p, c          # 一样近时，带撇的胜出
     return (best_p, best_c)
 
 

@@ -664,9 +664,9 @@ def test_same_pitch_follows_previous_key():
     followed = transcribe.match_key(seg, 48000, prefer="1'")
     other = transcribe.match_key(seg, 48000, prefer='5')     # 不同音高，不该乱跟
 
-    assert plain[0] == '8'                 # 没上下文时给 PAD 序号小的那个
-    assert followed[0] == "1'"             # 上一个音是 1'，就跟着用 1'
-    assert other[0] == '8'                 # 上一个音是 5（另一个音高）不影响
+    assert plain[0] == "1'"             # 同音高的孪生键默认给带撇的那个（1'）
+    assert followed[0] == "1'"           # 上一个也是 1'，继续保持
+    assert other[0] == "1'"              # 上一个音是 5（另一个音高）不影响
     # 两个名字指的是同一个音高
     assert math.isclose(transcribe.pitch_freq(plain[0]),
                         transcribe.pitch_freq(followed[0]), abs_tol=1e-6)

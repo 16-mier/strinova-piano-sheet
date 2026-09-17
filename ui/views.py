@@ -34,7 +34,11 @@ class SheetView(QWidget):
         self.hidden = False              # 临时隐身：什么都不画
         self.flash: dict[str, float] = {}   # 实时跟弹：音高 -> 到期时刻
         self._last_key = None            # 上一帧的绘制内容指纹（用于省重绘）
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # ★ 这里**不要**再设 WA_TranslucentBackground ★
+        #   父窗口（OverlayWindow）已经设过了，子控件再设一次会把自己
+        #   变成**原生窗口**，于是鼠标消息被它自己接走、不再冒泡到父窗口 ——
+        #   表现就是「点了允许拖动却怎么都拖不动」。
+        #   QWidget 默认本来就不画背景，透明效果不受影响。
 
     # ---- 数据接口 ----
 
