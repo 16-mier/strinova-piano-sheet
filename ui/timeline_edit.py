@@ -43,7 +43,7 @@ TOTAL_ROWS = 16     # 4×4
 
 HEAD_GRAB = 6       # 红线左右多少像素内算「抓住了红线」
 EDGE_GRAB = 6       # 音符右边缘多少像素内算「要拉时值」
-BAND_MIN = 4        # 位移超过这么多像素才算框选（不然就是「点一下挪播放头」）
+BAND_MIN = 7        # 位移超过这么多像素才算框选（不然就是「点一下挪播放头」）
 SCROLL_STEP = 22    # 拖到视野边缘时每次自动滚多少像素
 EDGE_ZONE = 26      # 离视野边缘这么近就开始自动滚
 
@@ -274,11 +274,15 @@ class TimelineEditor(QWidget):
             event.accept()
             return
 
-        # --- 空白：先当作「点一下挪播放头」，拖出距离才升级成框选 ---
+        # --- 空白：按下就**立刻**把播放头挪过来，拖出去才升级成框选 ---
+        #     （以前是等松手才挪，手一抖超过阈值就变成框选、红线不动，
+        #       体感就是"点了一下没反应"）
         beat = max(0.0, self._x_beat(pos.x()))
         self._band_anchor = beat
         self._band_moved = False
         self._mode = 'band'
+        self.set_playhead(max(0.0, beat))
+        self.playhead_moved.emit(self.playhead)
         if not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
             self.clear_selection()
         event.accept()
@@ -359,7 +363,8 @@ class TimelineEditor(QWidget):
             self._band_anchor = None
             self._band_moved = False
             if not was_moved:
-                # 没拖出距离 = 只是点了一下空白：播放头跳过去
+                # 没拖出距离 = 纯点一下：播放头已经按下时挪过去了，
+                # 这里只再对齐一次（防止按下的那一刻被别的逻辑改掉）
                 self.set_playhead(max(0.0, anchor))
                 self.playhead_moved.emit(self.playhead)
             event.accept()

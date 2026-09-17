@@ -31,7 +31,11 @@ def main() -> int:
     ap.add_argument('--snap', type=float, default=0.25)
     ap.add_argument('--max-cents', type=float, default=60.0)
     ap.add_argument('--min-margin', type=float, default=0.0,
-                    help='置信度门槛，调高更干净、调低多捞音')
+                    help='置信度门槛（dB），调高更干净、调低多捞音')
+    ap.add_argument('--onset-ratio', type=float, default=0.45,
+                    help='起音检测灵敏度，越小越敏感（默认 0.45）')
+    ap.add_argument('--onset-gap', type=float, default=0.08,
+                    help='两个起音之间至少隔多少秒（默认 0.08）')
     ap.add_argument('--out', default='')
     ap.add_argument('--no-calibrate', action='store_true')
     ap.add_argument('--debug', action='store_true')
@@ -54,6 +58,7 @@ def main() -> int:
     tokens, hits = transcribe.transcribe(
         audio, rate, bpm=bpm, snap=args.snap,
         max_cents=args.max_cents, min_margin=args.min_margin,
+        onset_ratio=args.onset_ratio, onset_min_gap=args.onset_gap,
         calibrate=not args.no_calibrate, info=info)
     print('  分析耗时 %.2f 秒' % (time.time() - t1))
 

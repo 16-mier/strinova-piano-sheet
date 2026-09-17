@@ -42,11 +42,10 @@ _BASE = 130.81278265        # C3
 # 识别出来的音符，本体最多占这么多拍（超出的时间写成休止符）
 MAX_NOTE_BEATS = 1.0
 
-# 置信度门槛的默认值。实测（B站视频那种带背景音乐的素材）：
-#   真琴音的「第一名 vs 第二名」分差中位数 ≈ 0.48
-#   背景音乐片段的中位数 ≈ 0.10
-#   所以卡在中间偏下一点，既能滤掉伴奏，又不至于把弱音也扔了。
-DEFAULT_MIN_MARGIN = 0.25
+# 置信度门槛的默认值（单位 **dB**，见 estimate_f0_peak_ex）。
+# 实测：干净的游戏采样 22~26 dB；背景音乐 / 噪声做出来的"假峰"低得多。
+# 卡在 8 附近：能滤掉伴奏，又不会把弱奏的琴音扔掉。
+DEFAULT_MIN_MARGIN = 8.0
 
 
 def pitch_freq(pitch: str) -> float:
@@ -241,6 +240,41 @@ def nearest_pitch(freq: float, offset_cents: float = 0.0) -> tuple[str, float]:
     return (best_p, best_c)
 
 
+def estimate_f0_peak_ex(seg: np.ndarray, rate: int,
+                        ratio: float = 0.15,
+                        fmin: float = 60.0) -> tuple[float, float]:
+    """返回 (基频, **谱峰突出度 dB**)。
+
+    突出度 = 那根柱子比它左右各 25 个 bin 的平均高出多少 dB。
+    真琴音是"一根尖柱"（基频、二次、三次谐波都是独立峰），
+    背景音乐/人声是"一片糊"，这个值会低得多 —— 实测能差出 10 dB 以上。
+    """
+    x = np.asarray(seg, dtype=np.float64)
+    if x.ndim > 1:
+        x = x.mean(axis=1)
+    x = x - x.mean()
+    m = len(x)
+    if m < 256 or not np.any(x) or rate <= 0:
+        return (0.0, 0.0)
+    spec = np.abs(np.fft.rfft(x * np.hanning(m)))
+    if spec.max() <= 0:
+        return (0.0, 0.0)
+    freqs = np.fft.rfftfreq(m, 1.0 / rate)
+    thr = float(spec.max()) * ratio
+    for i in range(2, len(spec) - 2):
+        if freqs[i] < fmin:
+            continue
+        if (spec[i] >= spec[i - 1] and spec[i] >= spec[i + 1]
+                and spec[i] > thr):
+            lo = max(0, i - 25)
+            hi = min(len(spec), i + 26)
+            around = float(spec[lo:hi].mean())
+            db = 20.0 * math.log10((float(spec[i]) + 1e-12)
+                                   / (around + 1e-12))
+            return (float(freqs[i]), db)
+    return (0.0, 0.0)
+
+
 def estimate_f0_peak(seg: np.ndarray, rate: int,
                      ratio: float = 0.15,
                      fmin: float = 60.0) -> float:
@@ -252,25 +286,7 @@ def estimate_f0_peak(seg: np.ndarray, rate: int,
       实测它把 `1`(130Hz) 认成 261Hz、把 `6`(219Hz) 认成 439Hz，正好差八度。
       而"最低的那根柱子就是基频"这条朴素规则，16 个采样全部命中。
     """
-    x = np.asarray(seg, dtype=np.float64)
-    if x.ndim > 1:
-        x = x.mean(axis=1)
-    x = x - x.mean()
-    m = len(x)
-    if m < 256 or not np.any(x) or rate <= 0:
-        return 0.0
-    spec = np.abs(np.fft.rfft(x * np.hanning(m)))
-    if spec.max() <= 0:
-        return 0.0
-    freqs = np.fft.rfftfreq(m, 1.0 / rate)
-    thr = float(spec.max()) * ratio
-    for i in range(2, len(spec) - 2):
-        if freqs[i] < fmin:
-            continue
-        if (spec[i] >= spec[i - 1] and spec[i] >= spec[i + 1]
-                and spec[i] > thr):
-            return float(freqs[i])
-    return 0.0
+    return estimate_f0_peak_ex(seg, rate, ratio, fmin)[0]
 
 
 def key_scores(seg: np.ndarray, rate: int, offset_cents: float = 0.0,
@@ -327,30 +343,25 @@ def key_scores(seg: np.ndarray, rate: int, offset_cents: float = 0.0,
     return out
 
 
-def match_key(seg: np.ndarray, rate: int, offset_cents: float = 0.0
-              ) -> tuple[str, float, float]:
-    """从琴上挑一个最像的键，返回 (音高, 理论频率, 置信度)。
+def match_key(seg: np.ndarray, rate: int, offset_cents: float = 0.0,
+              max_cents: float = 60.0) -> tuple[str, float, float]:
+    """从琴上挑一个最像的键，返回 (音高, 理论频率, **置信度 dB**)。
 
-    音高来自「最低的强谱峰」（对这 16 个采样最稳），
-    置信度来自谐波打分（第一名和第二名的分差，越大越可信）——
-    背景音乐那种「哪个键都不像」的片段，这个值会很小。
+    音高来自「最低的那根强谱峰 → 最近的键」；
+    置信度就是那根柱子有多突出（见 `estimate_f0_peak_ex`）。
+
+    ★ 别再用「谐波打分第一名 vs 第二名」当置信度 ★
+      实测它对这件乐器几乎没区分度：八度关系的两个键（1 和 8）谐波大面积重合，
+      真正的琴音照样能判出负分。现在改成看谱峰锐度，真琴音 ≳ 12 dB，
+      背景音乐/人声通常 < 8 dB。
     """
-    f0 = estimate_f0_peak(seg, rate)
+    f0, prominence = estimate_f0_peak_ex(seg, rate)
     if f0 <= 0:
         return ('', 0.0, 0.0)
-    pitch, _cents = nearest_pitch(f0, offset_cents)
-    if not pitch:
+    pitch, cents = nearest_pitch(f0, offset_cents)
+    if not pitch or abs(cents) > max_cents:
         return ('', 0.0, 0.0)
-
-    margin = 0.0
-    sc = key_scores(seg, rate, offset_cents)
-    if sc:
-        d = {p: s for p, s, _f in sc}
-        mine = d.get(pitch)
-        if mine is not None:
-            others = [s for p, s in d.items() if p != pitch]
-            margin = mine - (max(others) if others else mine)
-    return (pitch, pitch_freq(pitch), margin)
+    return (pitch, pitch_freq(pitch), prominence)
 
 
 def estimate_offset_cents(freqs) -> float:
@@ -415,6 +426,8 @@ def transcribe(audio: np.ndarray, rate: int,
                max_cents: float = 60.0,
                min_margin: float = DEFAULT_MIN_MARGIN,
                calibrate: bool = True,
+               onset_ratio: float = 0.45,
+               onset_min_gap: float = 0.08,
                info: dict | None = None) -> tuple[list[str], list[NoteHit]]:
     """把音频转成 (token 列表, 识别详情)。
 
@@ -434,7 +447,8 @@ def transcribe(audio: np.ndarray, rate: int,
     if len(a) == 0 or rate <= 0:
         return ([], [])
 
-    onsets = detect_onsets(a, rate)
+    onsets = detect_onsets(a, rate, thresh_ratio=onset_ratio,
+                           min_gap_s=onset_min_gap)
     if not onsets:
         return ([], [])
 
@@ -459,25 +473,26 @@ def transcribe(audio: np.ndarray, rate: int,
     drop_margins: list[float] = []
     for pos in onsets:
         seg = a[pos:pos + win]
-        pitch, f_theory, margin = match_key(seg, rate, offset)
+        if len(seg) == 0:
+            continue
+        # 注：试过给分析窗加「前重后轻」的衰减斜坡来压掉下一个音的干扰，
+        #     结果反而更差（认出 125 个 vs 原本 160 个）——
+        #     衰减等于缩短有效窗长、频率分辨率跟着降，「最低谱峰」更不准了。
+        #     别再走这条弯路。
+        pitch, f_theory, margin = match_key(seg, rate, offset, max_cents)
         # 注意：置信度可能是负的（打分第一名跟"最低谱峰"给出的音高不一致）。
         # 只有真的设了门槛（> 0）才拿它过滤，不然 min_margin=0 会误杀一片。
         if not pitch or (min_margin > 0 and margin < min_margin):
             dropped += 1
             drop_margins.append(margin)
             continue
-        # 偏差音分：拿「最低谱峰」跟理论值比。
-        # ⚠ 别用 f0_hps —— 它对谐波少的音（甚至纯正弦）会给出离谱的值。
+        # 偏差音分：拿「最低谱峰」跟理论值比（纯粹是显示用，不再拿来丢弃）
         f_meas = estimate_f0_peak(seg, rate) or f_theory
         cents = 1200.0 * math.log2(f_meas / f_theory)
         while cents > 600.0:
             cents -= 1200.0
         while cents < -600.0:
             cents += 1200.0
-        if abs(cents) > max_cents:
-            dropped += 1
-            drop_margins.append(margin)
-            continue
         hits.append(NoteHit(time=pos / rate, pitch=pitch,
                             freq=f_theory, cents=cents))
         hit_margins.append(margin)
@@ -532,10 +547,14 @@ def transcribe(audio: np.ndarray, rate: int,
 def to_sheet_text(audio: np.ndarray, rate: int, bpm: int = 120,
                   snap: float = 0.25, title: str = '听音记谱',
                   min_margin: float = DEFAULT_MIN_MARGIN,
+                  onset_ratio: float = 0.45,
+                  onset_min_gap: float = 0.08,
                   info: dict | None = None) -> tuple[str, list[NoteHit]]:
     """直接生成可以贴进编辑器的谱面文本。"""
     tokens, hits = transcribe(audio, rate, bpm=bpm, snap=snap,
-                              min_margin=min_margin, info=info)
+                              min_margin=min_margin,
+                              onset_ratio=onset_ratio,
+                              onset_min_gap=onset_min_gap, info=info)
     if not tokens:
         return ('', [])
     body = ' '.join(tokens)

@@ -1,11 +1,19 @@
 # -*- coding: utf-8 -*-
 """实时跟弹 —— 边听边认，认出就报。
 
-跟离线版 `transcribe` 用的是同一套算法（**谱通量找起点 + HPS 找音高**），
+跟离线版 `transcribe` 用的是同一套算法（**谱通量找起点 + 最低谱峰定音高**），
 区别是全部在一个滚动窗口里做：喂进来一块音频，就吐出来这块里认到的音。
 
-延迟大约 0.1 秒 —— 因为音高分析要等起点之后的一小段样本攒够。
+延迟大约 0.25 秒 —— 因为音高分析要等起点之后的一小段样本攒够。
 对"看着浮窗跟弹"来说完全够用。
+
+★ 为什么必须留一道置信度门槛（min_margin，单位 dB）★
+    loopback 录的是**整个输出设备**上的声音 —— 你放的背景音乐、网页视频、
+    语音通话，全都在这儿。而"最低谱峰 → 最近的琴键"这套办法对**任何**
+    有音高的声音都能凑出一个答案（音乐的音高是连续的，总有个键在 60 音分内）。
+    所以不过滤的话，放首歌都能给你"弹"出一整首谱子来。
+    置信度取的是「基频谱峰比周围平均高出多少 dB」：
+    干净的游戏采样 22~26 dB，噪声/伴奏做出来的假峰低得多，门槛卡 8 正好。
 
 两种用法
 --------
@@ -32,7 +40,7 @@ class LiveDetector:
                  thresh_ratio: float = 0.45, min_gap_s: float = 0.07,
                  local_win_s: float = 0.35, f0_win_s: float = 0.20,
                  max_cents: float = 60.0, gate_ratio: float = 0.04,
-                 dedup_s: float = 0.12, min_margin: float = 0.0):
+                 dedup_s: float = 0.12, min_margin: float = 8.0):
         self.rate = int(rate)
         self.hop = int(hop)
         self.win = int(win)
@@ -186,23 +194,12 @@ class LiveDetector:
                     (tt, '太轻 rms=%.5f < %.5f' % (rms, self._rms_peak
                                                    * self.gate_ratio)))
                 continue
-            f0 = estimate_f0_peak(seg, self.rate)
             pitch, f_theory, margin = match_key(seg, self.rate)
             # 置信度可能是负的，只有设了门槛才拿它过滤
             if not pitch or (self.min_margin > 0
                              and margin < self.min_margin):
                 self.rejects.append(
                     (tt, '置信度不够 %.3f' % margin))
-                continue
-            import math as _m
-            cents = 1200.0 * _m.log2((f0 or f_theory) / f_theory)
-            while cents > 600.0:
-                cents -= 1200.0
-            while cents < -600.0:
-                cents += 1200.0
-            if abs(cents) > self.max_cents:
-                self.rejects.append(
-                    (tt, '音不准 %s %+.0f 音分' % (pitch, cents)))
                 continue
             t = tt
             # 同一个音高在 dedup 秒内不重复报（抖动的第二簇会撞在这儿）

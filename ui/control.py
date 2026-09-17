@@ -105,6 +105,13 @@ class ControlWindow(QMainWindow):
         self._recording = False
         self._rec_chunks: list = []
         self._live_count = 0
+        # 诊断用：录音线程里写的几个数（简单赋值，跨线程安全）
+        self._live_level = 0.0
+        self._live_blocks = 0
+        self._live_device = ''
+        self._tick_live = QTimer(self)
+        self._tick_live.setInterval(220)
+        self._tick_live.timeout.connect(self._update_live_label)
 
         # 全局热键挂在谱面窗上 —— 它常驻、置顶、且不会抢焦点
         self.hotkeys = HotkeyManager(overlay, self)
@@ -167,7 +174,39 @@ class ControlWindow(QMainWindow):
 
         self.lbl_live = QLabel('实时跟弹：没在听')
         self.lbl_live.setStyleSheet('color:#7fd8c0;')
+        self.lbl_live.setWordWrap(True)
         f.addWidget(self.lbl_live)
+
+        lrow = QHBoxLayout()
+        self.cmb_live_dev = QComboBox()
+        self.cmb_live_dev.setMinimumWidth(260)
+        self.cmb_live_dev.setToolTip(
+            '监听哪个输出设备 —— **游戏声音从哪个设备出来就选哪个**。\n'
+            '选错了会一直听不到东西（下面的电平条会一直空着）。')
+        btn_live_scan = QPushButton('重新扫描')
+        btn_live_scan.setFixedHeight(26)
+        btn_live_scan.clicked.connect(self._fill_live_devices)
+        lrow.addWidget(QLabel('监听设备'))
+        lrow.addWidget(self.cmb_live_dev, 1)
+        lrow.addWidget(btn_live_scan)
+        f.addLayout(lrow)
+
+        srow = QHBoxLayout()
+        self.cmb_sense = QComboBox()
+        # (起音灵敏度, 起音最小间隔, 置信度门槛 dB)
+        self.cmb_sense.addItem('宽松（尽量多捞音）', (0.25, 0.05, 6.0))
+        self.cmb_sense.addItem('标准', (0.32, 0.06, 8.0))
+        self.cmb_sense.addItem('严格（少些杂音）', (0.45, 0.08, 14.0))
+        self.cmb_sense.setCurrentIndex(0)
+        self.cmb_sense.setToolTip(
+            '导入音频/视频时用哪档。\n'
+            '宽松：起音检测更敏感、置信度门槛更低 —— 音更多，但也更容易混进伴奏\n'
+            '严格：反过来，只留最确定的那些音\n'
+            '录音（听音记谱）也走这个档位')
+        srow.addWidget(QLabel('导入灵敏度'))
+        srow.addWidget(self.cmb_sense)
+        srow.addStretch(1)
+        f.addLayout(srow)
 
         self.btn_open, self.btn_edit, self.btn_reload = (btn_open, btn_edit,
                                                         btn_reload)
@@ -318,10 +357,11 @@ class ControlWindow(QMainWindow):
         fv.addRow('', self.chk_overlay)
 
         self.chk_only_game = QCheckBox('只在卡拉彼丘窗口在前台时才显示')
-        self.chk_only_game.setChecked(True)
+        self.chk_only_game.setChecked(False)   # 默认不隐身，免得以为浮窗坏了
         self.chk_only_game.setToolTip(
             '勾上之后：切出去看网页 / 打字时浮窗自动隐身，回到游戏立刻现形。\n'
-            '隐身 ≠ 关闭 —— 全局热键在隐身状态下照样能按。')
+            '隐身 ≠ 关闭 —— 全局热键在隐身状态下照样能按。\n'
+            '（默认不勾：浮窗一直挂着，跟以前一样）')
         fv.addRow('', self.chk_only_game)
 
         self.lbl_fg = QLabel('—')
@@ -437,6 +477,10 @@ class ControlWindow(QMainWindow):
         self.btn_listen.clicked.connect(self._open_listen)
         self.btn_import.clicked.connect(self._pick_import_file)
         self.btn_live.clicked.connect(self._toggle_live)
+        self.cmb_live_dev.currentIndexChanged.connect(
+            lambda _i: self._save_config())
+        self.cmb_sense.currentIndexChanged.connect(
+            lambda _i: self._save_config())
         self.cmb_sheet.currentIndexChanged.connect(self._pick_from_combo)
 
         self.btn_play.clicked.connect(self.player.toggle)
@@ -676,8 +720,15 @@ class ControlWindow(QMainWindow):
         if in_game != self._fg_last:
             self._fg_last = in_game
             self.overlay.set_ghost(not in_game)
-        txt = '%s　%s' % ('🎮 卡丘在前台' if in_game else '…不是卡丘',
-                          winfocus.describe_foreground())
+        # 把「浮窗现在是露着还是隐身」写清楚 —— 不然会以为它坏了
+        if self.overlay.ghost:
+            state = '浮窗已隐身（不在卡丘前台）'
+        elif not self.chk_overlay.isChecked():
+            state = '浮窗已关闭'
+        else:
+            state = '浮窗显示中'
+        txt = '%s　%s　→　%s' % ('🎮 卡丘在前台' if in_game else '…不是卡丘',
+                                winfocus.describe_foreground(), state)
         if txt != self.lbl_fg.text():
             self.lbl_fg.setText(txt)
 
@@ -754,22 +805,54 @@ class ControlWindow(QMainWindow):
         self._listen.raise_()
         self._listen.activateWindow()
 
+    def _fill_live_devices(self):
+        """列可监听的输出设备 —— 游戏声音从哪出来就选哪个。"""
+        keep = self.cmb_live_dev.currentData() if hasattr(
+            self, 'cmb_live_dev') else None
+        outs = recorder.list_output_devices()
+        self.cmb_live_dev.blockSignals(True)
+        self.cmb_live_dev.clear()
+        for name, dev in outs:
+            self.cmb_live_dev.addItem(name, dev)
+        self.cmb_live_dev.blockSignals(False)
+        want = keep or self._cfg.get('live_device', '') \
+            or recorder.guess_game_device()
+        if want:
+            i = self.cmb_live_dev.findData(want)
+            if i < 0 and isinstance(want, str):
+                for k in range(self.cmb_live_dev.count()):
+                    if want.lower() in self.cmb_live_dev.itemText(k).lower():
+                        i = k
+                        break
+            if i >= 0:
+                self.cmb_live_dev.setCurrentIndex(i)
+
+    def _live_device_id(self) -> str | None:
+        got = self.cmb_live_dev.currentData()
+        if got:
+            return str(got)
+        return self._listen_device_id()
+
     # ------------------------------------------------------------------
     # 实时跟弹 / 录音（共用同一条 loopback 流）
     # ------------------------------------------------------------------
 
     def _start_audio(self, record: bool) -> bool:
         """开一条 loopback 流。record=True 攒着回头转录，False 就只是听着。"""
-        dev = self._listen_device_id()
+        dev = self._live_device_id()
         if not dev:
-            self.overlay.show_toast('没找到录音设备\n'
-                                    '先去控制台的「听音记谱」里选一个')
+            self.overlay.show_toast('没找到可监听的设备\n'
+                                    '面板上「监听设备」里挑一个')
+            self.lbl_live.setText('实时跟弹：没有可用设备，请在上面的下拉框里选一个')
             return False
         self._live = live.LiveDetector(rate=48000)
         self._live_only = not record
         self._recording = record
         self._rec_chunks = []
         self._live_count = 0
+        self._live_blocks = 0
+        self._live_level = 0.0
+        self._live_device = self.cmb_live_dev.currentText() or dev
         self._stream = recorder.LoopbackStream(self._on_audio_block,
                                                blocksize=1024,
                                                samplerate=48000)
@@ -783,8 +866,11 @@ class ControlWindow(QMainWindow):
             self._live = None
             self._recording = False
             self.overlay.show_toast('开不了监听：\n%s' % (err or '')[:80])
+            self.lbl_live.setText('实时跟弹：开流失败 —— %s' % (err or '未知原因')[:70])
             return False
         self.overlay.clear_flash()
+        self._tick_live.start()
+        self._update_live_label()
         return True
 
     def _stop_audio(self):
@@ -793,26 +879,48 @@ class ControlWindow(QMainWindow):
         self._stream = None
         self._live = None
         self._live_only = False
+        self._tick_live.stop()
         self.btn_live.setText('👀 实时跟弹')
         self.overlay.clear_flash()
         self.lbl_live.setText('实时跟弹：没在听')
 
     def _on_audio_block(self, block):
         """⚠ 这个跑在录音线程里 —— 只能碰纯数据，绝不许碰界面。"""
+        arr = np.asarray(block, dtype=np.float32)
+        self._live_blocks += 1
+        try:
+            self._live_level = float(np.sqrt(np.mean(arr * arr)))
+        except Exception:
+            pass
         if self._recording:
-            self._rec_chunks.append(np.asarray(block, dtype=np.float32))
+            self._rec_chunks.append(arr)
         det = self._live
         if det is None:
             return
-        for _t, pitch, freq in det.push(block):
+        for _t, pitch, freq in det.push(arr):
             self._bridge.note.emit(pitch, float(freq))
+
+    def _update_live_label(self):
+        """把「正在听什么、有没有声音进来、认出了几个」写清楚。
+
+        这样一眼就能判断问题出在哪儿：电平条一直空 = 设备选错了；
+        有电平但不涨计数 = 检测没出结果。
+        """
+        if self._stream is None or not self._stream.running:
+            self._tick_live.stop()
+            return
+        lv = self._live_level
+        idx = min(len('_▁▂▃▄▅▆▇█') - 1, int(lv * 120))
+        bar = '_▁▂▃▄▅▆▇█'[idx]
+        self.lbl_live.setText(
+            '%s「%s」　电平 %s　音频块 %d　认出 %d 个'
+            % ('● 录音中' if self._recording else '● 正在听',
+               self._live_device, bar, self._live_blocks, self._live_count))
 
     def _on_live_note(self, pitch: str, freq: float):
         """回到主线程了 —— 亮浮窗、更新状态行。"""
         self.overlay.flash_note(pitch)
         self._live_count += 1
-        self.lbl_live.setText('刚听到：%s（%.0f Hz）　本次累计 %d 个'
-                              % (pitch, freq, self._live_count))
 
     def _toggle_live(self):
         """只听不录 —— 游戏里敲哪个键，浮窗就亮哪个。"""
@@ -1015,14 +1123,16 @@ class ControlWindow(QMainWindow):
             self.statusBar().showMessage('上一个还在分析呢，稍等…')
             return
         self._importing = True
+        # 参数在主线程读好再交给后台线程（Qt 控件不能跨线程碰）
+        sense = self.cmb_sense.currentData() or (0.25, 0.05, 6.0)
         self.statusBar().showMessage('正在读 %s …' % os.path.basename(path))
         self.overlay.show_toast('正在分析音频…\n（长的曲可能要等十几秒）', 120)
         import threading
-        threading.Thread(target=self._import_worker, args=(path,),
+        threading.Thread(target=self._import_worker, args=(path, sense),
                          daemon=True).start()
 
-    def _import_worker(self, path: str):
-        """在后台线程里跑 —— 别卡住界面。"""
+    def _import_worker(self, path: str, sense):
+        """在后台线程里跑 —— 别卡住界面。sense = (起音比, 起音间隔, 门槛dB)"""
         try:
             from core import audio_io
             audio, rate = audio_io.load_audio(path)
@@ -1034,7 +1144,8 @@ class ControlWindow(QMainWindow):
             text, hits = transcribe.to_sheet_text(
                 audio, rate, bpm=bpm, title='导入：%s'
                 % os.path.splitext(os.path.basename(path))[0],
-                info=info)
+                min_margin=sense[2], onset_ratio=sense[0],
+                onset_min_gap=sense[1], info=info)
             self._bridge.done.emit({
                 'path': path, 'text': text, 'hits': hits, 'bpm': bpm,
                 'info': info, 'seconds': len(audio) / float(rate),
@@ -1246,7 +1357,7 @@ class ControlWindow(QMainWindow):
             ed.set_binding(*parse_binding(cfg.get(key, '不绑定')))
 
         for chk, key, dflt in ((self.chk_overlay, 'overlay_show', True),
-                               (self.chk_only_game, 'only_game', True),
+                               (self.chk_only_game, 'only_game', False),
                                (self.chk_pin, 'pin', False)):
             chk.blockSignals(True)
             chk.setChecked(bool(cfg.get(key, dflt)))
@@ -1265,6 +1376,11 @@ class ControlWindow(QMainWindow):
         self._apply_view_options()
         self._apply_overlay_visibility()
         self._refresh_cast_devices()
+        self._fill_live_devices()
+        self.cmb_sense.blockSignals(True)
+        self.cmb_sense.setCurrentIndex(
+            max(0, min(2, int(cfg.get('sense', 0)))))
+        self.cmb_sense.blockSignals(False)
         if self.chk_pin.isChecked():
             self._tick_pin.start()
             QTimer.singleShot(500, self._follow_tick)
@@ -1292,6 +1408,8 @@ class ControlWindow(QMainWindow):
             'cast_mon_on': self.chk_cast_mon.isChecked(),
             'cast_vol': self.sld_cast_vol.value(),
             'cast_file': self.txt_cast.text(),
+            'live_device': self.cmb_live_dev.currentData() or '',
+            'sense': self.cmb_sense.currentIndex(),
             'listen_device': (self._listen.cmb_dev.currentText()
                               if self._listen is not None else
                               self._cfg.get('listen_device', '')),
