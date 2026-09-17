@@ -487,6 +487,21 @@ for i in range(token.count("^")): duration *= 0.5   # 每个 ^ 砍半
   想压掉下一个音的干扰 —— 结果更差（认出 125 个 vs 原本 160 个），
   因为衰减等于缩短有效窗长、频率分辨率跟着降，"最低谱峰"反而更不准。
 
+#### ⑨ 「隐身」不能用 setWindowOpacity(0) 做
+
+勾上「允许拖动」之后浮窗要变成全透明（好看清底下的画面），
+第一版是直接 `setWindowOpacity(0.0)` —— **结果浮窗变成一片白**。
+
+原因：`setWindowOpacity` 会去动窗口的 `WS_EX_LAYERED` 属性，
+而「鼠标穿透」那套 `_apply_exstyle` 也在管这个属性，两边打架。
+
+**正确做法**：**什么都不画**。窗口是 `WA_TranslucentBackground`，
+不画就等于完全透明，而且**完全不碰窗口样式**。
+（`SheetView.set_hidden()` + `paintEvent` 开头直接 return；
+`set_ghost()` 改成调它。）
+
+「只在卡丘前台显示」用的也是这套隐身，所以同样受益。
+
 #### 还欠一件事
 
 - **16 键的物理排布**（哪个 PAD 在哪行哪列）还是来自截图，没实测过。

@@ -286,23 +286,26 @@ class OverlayWindow(QWidget):
     # ---- 临时隐身 ----
 
     def set_ghost(self, on: bool):
-        """临时隐身：窗口还「在」，全局热键照收得到，但完全透明看不见。
+        """临时隐身：窗口还「在」（全局热键照收得到、鼠标照样抓得住），
+        但**什么都不画** —— 因为窗口是 WA_TranslucentBackground，
+        不画就等于完全透明。
 
-        为什么不直接 hide()：隐藏掉的窗口收不到 WM_HOTKEY，
-        一隐身就再也唤不回来了（只能回控制面板点）。
+        ★ 换成"不画内容"而不是 setWindowOpacity(0) ★
+          后者会动 WS_EX_LAYERED，跟鼠标穿透的样式管理打架，
+          实测勾上「允许拖动」后浮窗会变成一片白。
         """
         on = bool(on)
         if on == self._ghost:
             return
         self._ghost = on
-        self.setWindowOpacity(0.0 if on else self._user_opacity)
+        self.grid_view.set_hidden(on)
 
     @property
     def ghost(self) -> bool:
         return self._ghost
 
     def set_user_opacity(self, v: float):
-        """用户设定的不透明度（隐身期间先记着，露脸时再套用）。"""
+        """用户设定的不透明度（隐身期间不生效，露脸时再套用）。"""
         self._user_opacity = max(0.05, min(1.0, float(v)))
         if not self._ghost:
             self.setWindowOpacity(self._user_opacity)

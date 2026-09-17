@@ -31,6 +31,7 @@ class SheetView(QWidget):
         self.preview_count = 5
         self.show_labels = True
         self.bg_scale = 1.0              # 底板浓度（1 = 原样，0 = 全透明）
+        self.hidden = False              # 临时隐身：什么都不画
         self.flash: dict[str, float] = {}   # 实时跟弹：音高 -> 到期时刻
         self._last_key = None            # 上一帧的绘制内容指纹（用于省重绘）
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -57,6 +58,17 @@ class SheetView(QWidget):
     def set_bg_scale(self, scale: float):
         """底板浓度 —— 只影响背景和格子，音名文字一点不受影响。"""
         self.bg_scale = max(0.0, min(1.0, float(scale)))
+        self._last_key = None
+        self.update()
+
+    def set_hidden(self, on: bool):
+        """什么都不画 —— 配合 WA_TranslucentBackground 就等于完全透明。
+
+        ★ 别用 setWindowOpacity(0) 干这事 ★
+          那会去动窗口的 WS_EX_LAYERED 属性，跟"鼠标穿透"那套
+          exstyle 管理打架 —— 实测勾上「允许拖动」后浮窗会变成一片白。
+        """
+        self.hidden = bool(on)
         self._last_key = None
         self.update()
 
@@ -134,6 +146,8 @@ class GridView(SheetView):
             self.update()
 
     def paintEvent(self, _ev):
+        if self.hidden:
+            return                       # 不画 = 全透明（窗口还在，鼠标照样能抓）
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         self._panel(p)
