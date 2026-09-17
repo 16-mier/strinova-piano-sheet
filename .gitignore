@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+config.json
+run.err
+run.out
+preview_*.png
+shot_*.png
