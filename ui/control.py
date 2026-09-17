@@ -423,8 +423,9 @@ class ControlWindow(QMainWindow):
         fg.addLayout(prow3)
 
         self.lbl_tip = QLabel('提示：谱面窗平时是「鼠标穿透」的，枪能直接打过去；'
-                              '要挪位置就先勾上左边这个开关。'
-                              '游戏里画面一直在动，用上面那排按钮贴位置最省事。')
+                              '要挪位置就勾上左边这个开关 —— 勾上之后浮窗会**全透明**'
+                              '（好看清画面），鼠标移到它原来的位置上会变成四向箭头，'
+                              '按住就能拖。游戏里画面一直在动，用上面那排按钮贴位置最省事。')
         self.lbl_tip.setWordWrap(True)
         self.lbl_tip.setStyleSheet('color:#9aa3b8;')
         fg.addWidget(self.lbl_tip)
@@ -854,7 +855,7 @@ class ControlWindow(QMainWindow):
         self._live_level = 0.0
         self._live_device = self.cmb_live_dev.currentText() or dev
         self._stream = recorder.LoopbackStream(self._on_audio_block,
-                                               blocksize=1024,
+                                               blocksize=512,
                                                samplerate=48000)
         ok = self._stream.start(str(dev), channels=2)
         if not ok:
@@ -1294,9 +1295,15 @@ class ControlWindow(QMainWindow):
             self.overlay.show()
             self.overlay.raise_()
             self.overlay.set_click_through(False)
-            self.statusBar().showMessage('现在可以拖动谱面窗了 —— 摆好后请取消勾选')
+            # 拖动期间直接**全透明** —— 好看清底下的游戏画面。
+            # 鼠标在浮窗范围内会变成"移动"光标，凭它就能抓。
+            self.overlay.set_ghost(True)
+            self.statusBar().showMessage(
+                '可以拖了（浮窗暂时全透明，好看清画面）—— 鼠标移到它原来的'
+                '位置上会变成四向箭头，按住就拖；摆好请取消勾选')
         else:
             self.overlay.set_click_through(True)
+            self.overlay.set_ghost(False)
             self.statusBar().showMessage('已恢复鼠标穿透')
             self._sync_geom_from_overlay()
 

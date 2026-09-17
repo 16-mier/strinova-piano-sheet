@@ -240,14 +240,50 @@ def nearest_pitch(freq: float, offset_cents: float = 0.0) -> tuple[str, float]:
     return (best_p, best_c)
 
 
+def refine_onsets(a: np.ndarray, onsets, rate: int,
+                  search_s: float = 0.015) -> list[int]:
+    """把每个起音位置精确到样本级。
+
+    粗定位是「通量帧的中心」，误差能到半个窗（约 10ms）——
+    弹得快的时候（十六分音符 90ms 一个）这 10ms 就够把前一个音的尾巴
+    算进分析窗，音高直接测歪、甚至整个丢掉。
+    在粗定位附近找**能量上升最陡**的那一点，把它修正过来。
+    """
+    n = len(a)
+    span = int(search_s * rate)
+    smooth = max(3, int(0.0015 * rate))       # 1.5ms 滑动平均，压毛刺
+    k = np.ones(smooth) / smooth
+    out: list[int] = []
+    for pos in onsets:
+        lo = max(0, pos - span)
+        hi = min(n, pos + span)
+        if hi - lo < smooth * 3:
+            out.append(pos)
+            continue
+        env = np.convolve(np.abs(a[lo:hi]), k, mode='same')
+        d = np.diff(env)
+        if len(d) == 0:
+            out.append(pos)
+            continue
+        out.append(lo + int(np.argmax(d)))
+    return out
+
+
 def estimate_f0_peak_ex(seg: np.ndarray, rate: int,
                         ratio: float = 0.15,
-                        fmin: float = 60.0) -> tuple[float, float]:
+                        fmin: float = 105.0) -> tuple[float, float]:
     """返回 (基频, **谱峰突出度 dB**)。
 
     突出度 = 那根柱子比它左右各 25 个 bin 的平均高出多少 dB。
     真琴音是"一根尖柱"（基频、二次、三次谐波都是独立峰），
     背景音乐/人声是"一片糊"，这个值会低得多 —— 实测能差出 10 dB 以上。
+
+    ★ fmin 为什么是 105 Hz ★
+      琴的最低音 `1` 是 C3 = 130.8Hz。以前这里写 60Hz，是当初误以为
+      最低音是 C4 时留下的 —— 结果低音区老是被 60~100Hz 的假峰带跑：
+      起音包络（快起音 + 指数衰减）本身会在极低频堆出能量，
+      实测把 `1` 测成了 67.8Hz（正好一半）。卡在 105 就干净了，
+      同时给整体降调的录音留了 20% 余量。
     """
     x = np.asarray(seg, dtype=np.float64)
     if x.ndim > 1:
@@ -271,13 +307,25 @@ def estimate_f0_peak_ex(seg: np.ndarray, rate: int,
             around = float(spec[lo:hi].mean())
             db = 20.0 * math.log10((float(spec[i]) + 1e-12)
                                    / (around + 1e-12))
-            return (float(freqs[i]), db)
+            f = float(freqs[i])
+            # ★ 抛物线插值：弹得快时窗口只能取很短，bin 会粗到 10Hz 以上
+            #   （130Hz 就是 ±60 音分），光靠 bin 中心根本对不准。
+            #   拿峰和左右两个邻居拟合抛物线，能把峰位修正到 bin 之间。
+            y0 = float(spec[i - 1])
+            y1 = float(spec[i])
+            y2 = float(spec[i + 1])
+            den = y0 - 2.0 * y1 + y2
+            if abs(den) > 1e-12:
+                frac = 0.5 * (y0 - y2) / den
+                if -0.5 <= frac <= 0.5:
+                    f += frac * (float(freqs[1]) - float(freqs[0]))
+            return (f, db)
     return (0.0, 0.0)
 
 
 def estimate_f0_peak(seg: np.ndarray, rate: int,
                      ratio: float = 0.15,
-                     fmin: float = 60.0) -> float:
+                     fmin: float = 105.0) -> float:
     """估基频：幅度谱里**最低的那根够强的柱子**。
 
     ★ 为什么这件乐器用这个而不是 HPS ★
@@ -451,6 +499,8 @@ def transcribe(audio: np.ndarray, rate: int,
                            min_gap_s=onset_min_gap)
     if not onsets:
         return ([], [])
+    # 把起点精确到样本级 —— 弹得快时差这 10ms 就全乱
+    onsets = refine_onsets(a, onsets, rate)
 
     spb = 60.0 / max(1, bpm)
     win = max(256, int(win_s * rate))
@@ -471,14 +521,23 @@ def transcribe(audio: np.ndarray, rate: int,
     dropped = 0
     hit_margins: list[float] = []
     drop_margins: list[float] = []
-    for pos in onsets:
-        seg = a[pos:pos + win]
-        if len(seg) == 0:
+    # 窗口至少要有这么长，否则 FFT 分辨率太烂（45ms ≈ 130Hz 的 6 个周期）
+    min_win = max(2048, int(0.045 * rate))
+    for k, pos in enumerate(onsets):
+        end = pos + win
+        if k + 1 < len(onsets):
+            # ★ 下一个音就在跟前的话，窗口只取到它之前一点 ★
+            #   不然窗里混着两个音，「最低谱峰」测出来的是谁都不好说 ——
+            #   弹快的时候这就是"漏音 + 错位"的主因。
+            end = min(end, max(pos + min_win,
+                               onsets[k + 1] - int(0.006 * rate)))
+        seg = a[pos:end]
+        if len(seg) < 256:
             continue
         # 注：试过给分析窗加「前重后轻」的衰减斜坡来压掉下一个音的干扰，
         #     结果反而更差（认出 125 个 vs 原本 160 个）——
         #     衰减等于缩短有效窗长、频率分辨率跟着降，「最低谱峰」更不准了。
-        #     别再走这条弯路。
+        #     别再走这条弯路，改用上面那个「按下一个音的远近动态截断」。
         pitch, f_theory, margin = match_key(seg, rate, offset, max_cents)
         # 注意：置信度可能是负的（打分第一名跟"最低谱峰"给出的音高不一致）。
         # 只有真的设了门槛（> 0）才拿它过滤，不然 min_margin=0 会误杀一片。

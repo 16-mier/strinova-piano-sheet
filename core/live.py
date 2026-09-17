@@ -4,8 +4,21 @@
 跟离线版 `transcribe` 用的是同一套算法（**谱通量找起点 + 最低谱峰定音高**），
 区别是全部在一个滚动窗口里做：喂进来一块音频，就吐出来这块里认到的音。
 
-延迟大约 0.25 秒 —— 因为音高分析要等起点之后的一小段样本攒够。
-对"看着浮窗跟弹"来说完全够用。
+延迟大约 0.15 秒 —— 因为音高分析要等起点之后的一小段样本攒够。
+
+★ 参数为什么调这么"紧"（弹快时漏音/错位、反应慢，都是这几个数在管）★
+    thresh_ratio = 0.30  起音判定阈值。原来是 0.45，快速连音时前一个音的通量峰
+                         还压在邻域里，后一个音相对值被压到线下 —— 直接漏掉。
+    local_win_s = 0.16   局部归一化的邻域。同理，原来是 0.22/0.35，太长。
+    f0_win_s = 0.12      音高分析窗，配合 live 版「等到下一个起点再截窗」
+                         （_collect 里的 late_s）一起用。
+    min_gap_s = 0.05     两个起音之间最少隔这么久（= 最快 20 个/秒）
+    late_s = 0.03        起点定案后等这么久再分析 —— 好让"下一个起点"冒出来，
+                         从而把窗截到它之前。这个是**延迟的主要来源**，别再加大。
+    dedup_s = 0.06       同一音高多久内不重复报。原来是 0.12 —— 快速重复同一个音
+                         （`1 1 1 1`）会被吃掉。
+
+    端到端延迟 ≈ late_s + min_win + 音频块 + 高亮刷新 ≈ 30+45+11+16 ≈ 100ms
 
 ★ 为什么必须留一道置信度门槛（min_margin，单位 dB）★
     loopback 录的是**整个输出设备**上的声音 —— 你放的背景音乐、网页视频、
@@ -37,10 +50,10 @@ class LiveDetector:
     """
 
     def __init__(self, rate: int = 48000, hop: int = 256, win: int = 1024,
-                 thresh_ratio: float = 0.45, min_gap_s: float = 0.07,
-                 local_win_s: float = 0.35, f0_win_s: float = 0.20,
+                 thresh_ratio: float = 0.45, min_gap_s: float = 0.04,
+                 local_win_s: float = 0.25, f0_win_s: float = 0.12,
                  max_cents: float = 60.0, gate_ratio: float = 0.04,
-                 dedup_s: float = 0.12, min_margin: float = 8.0):
+                 dedup_s: float = 0.06, min_margin: float = 6.0):
         self.rate = int(rate)
         self.hop = int(hop)
         self.win = int(win)
@@ -50,7 +63,13 @@ class LiveDetector:
         self.gate_ratio = float(gate_ratio)
         self.dedup_s = float(dedup_s)
         self.min_margin = float(min_margin)
+        self.local_win_s = float(local_win_s)
+        # 最近几次的起音间隔 —— 拿来动态定"局部归一化看多远"（见 _local_frames）
+        self._recent_gaps: deque[float] = deque(maxlen=6)
         self.f0_len = max(256, int(f0_win_s * self.rate))
+        # 分析窗的下限（再短 FFT 分辨率就没法看了）和"等一等再处理"的时长
+        self.min_win = max(2048, int(0.045 * self.rate))
+        self.late_s = 0.03
 
         local_frames = max(3, int(local_win_s * self.rate / self.hop))
         self._frames: deque[tuple[int, float]] = deque(maxlen=local_frames + 2)
@@ -72,6 +91,8 @@ class LiveDetector:
         self.log: deque[tuple[float, float, bool]] = deque(maxlen=8000)
         # 被丢掉的 onset 及原因
         self.rejects: deque[tuple[float, str]] = deque(maxlen=500)
+        # 每次定案的时间（诊断用：看起音到底定下来几个）
+        self.settled: deque[float] = deque(maxlen=500)
 
     # ---------------- 主入口 ----------------
 
@@ -114,6 +135,24 @@ class LiveDetector:
 
     # ---------------- 内部 ----------------
 
+    def _local_frames(self) -> int:
+        """局部归一化要往回看多少帧 —— **弹得快就自动收窄**。
+
+        窗口定死的话总有一头不对：
+          太长 → 快速连音时前一个音的通量峰还压在邻域里，
+                 后一个音的相对值被压到阈值以下，**直接漏掉**；
+          太短 → 慢速时一个音的衰减抖动就被当成好几个起音，**重复报**。
+        所以拿最近几次的起音间隔当尺子，把邻域卡在 1.6 倍间隔左右。
+        """
+        sec = self.local_win_s
+        if self._recent_gaps:
+            gap = float(np.median(self._recent_gaps))
+            sec = min(sec, max(0.09, gap * 1.6))
+        return max(3, int(sec * self.rate / self.hop))
+        # ⚠ local_win_s 的默认值不敢给大：0.35 的时候，7 个音快速连弹
+        #   （90ms 一个）会全挤进同一个邻域里互相压制，只有最响的那个
+        #   冒得出来 —— 实测只认出 2/7。0.18 起步、再按实际间隔自适应。★
+
     def _check_onset(self):
         """看「上一帧」是不是一个起音（需要它前后各一帧才能判定）。
 
@@ -149,6 +188,9 @@ class LiveDetector:
             return
         best = max(self._cands, key=lambda c: c[0])
         self._waiting.append(best[1])
+        self.settled.append(best[2])
+        if self._last_settled_t > -1.0:
+            self._recent_gaps.append(best[2] - self._last_settled_t)
         self._last_settled_t = best[2]
         self._cands = [c for c in self._cands
                        if c[2] >= best[2] + self.min_gap_s]
@@ -164,29 +206,60 @@ class LiveDetector:
     def flush(self) -> list[tuple[float, str, float]]:
         """收尾：把还挂着的候选定案（停止监听前调一次）。"""
         self._flush_cands()
-        return self._collect()
+        return self._collect(force=True)
 
-    def _collect(self) -> list[tuple[float, str, float]]:
-        # 攒够音高窗口的挑出来处理 —— 不能因为队首没攒够就卡住后面的
-        ready = [at for at in self._waiting
-                 if at + self.f0_len <= self._total]
-        if ready:
-            self._waiting = [at for at in self._waiting
-                             if at + self.f0_len > self._total]
+    def _collect(self, force: bool = False) -> list[tuple[float, str, float]]:
+        # ★ 先"等一会儿"再处理 ★
+        #   弹得快时如果起点一到就切 0.12 秒的窗，窗尾必然盖住下一个音，
+        #   音高就测歪了。等一下（60ms）就能看见下一个起点在哪，
+        #   把窗截到它之前 —— 和离线版的做法对齐。
+        now_t = self._total / float(self.rate)
+        if force:
+            ready = list(self._waiting)
+            self._waiting = []
+        else:
+            ready = [at for at in self._waiting
+                     if now_t - at / float(self.rate) >= self.late_s]
+            if ready:
+                self._waiting = [at for at in self._waiting
+                                 if at not in ready]
+        known = sorted(set(ready) | set(self._waiting))
 
         out: list[tuple[float, str, float]] = []
+        span = int(0.015 * self.rate)
+        smooth = max(3, int(0.0015 * self.rate))
+        k = np.ones(smooth) / smooth
         for at in sorted(ready):
             tt = at / float(self.rate)
+            # ★ 起点精修：粗定位是通量帧的中心，误差能到 10ms ——
+            #   弹得快时这点偏差就够把前一个音的尾巴算进来。★
+            lo = max(self._abs_pos, at - span)
+            hi = min(self._abs_pos + len(self._raw), at + span)
+            if hi - lo > smooth * 3:
+                env = np.convolve(
+                    np.abs(self._raw[lo - self._abs_pos:
+                                     hi - self._abs_pos]), k, mode='same')
+                d = np.diff(env)
+                if len(d):
+                    at = lo + int(np.argmax(d))
+                    tt = at / float(self.rate)
+
             if at < self._abs_pos:
                 self.rejects.append((tt, '太老（缓冲已经滑走）'))
                 continue                             # 太老了，丢了
+            # 窗口右端：到下一个起点之前，但至少留 min_win
+            end = at + self.f0_len
+            nxt = next((x for x in known if x > at), None)
+            if nxt is not None:
+                end = min(end, max(at + self.min_win,
+                                   nxt - int(0.006 * self.rate)))
             i = at - self._abs_pos
-            seg = self._raw[i:i + self.f0_len]
-            if len(seg) < 128:
+            seg = self._raw[i:i + max(1, end - at)]
+            if len(seg) < 256:
                 self.rejects.append((tt, '片段太短'))
                 continue
-            if len(seg) < self.f0_len:
-                seg = np.pad(seg, (0, self.f0_len - len(seg)))
+            if len(seg) < self.min_win:
+                seg = np.pad(seg, (0, self.min_win - len(seg)))
             # 绝对静音门限：别把底噪当音符报出来
             rms = float(np.sqrt(np.mean(seg * seg)))
             if rms < self._rms_peak * self.gate_ratio:
@@ -220,6 +293,8 @@ class LiveDetector:
         self._frames.clear()
         self._cands.clear()
         self._waiting.clear()
+        self.settled.clear()
         self._last_settled_t = -9.0
+        self._recent_gaps.clear()
         self._last_pitch_t.clear()
         self._rms_peak = 1e-6

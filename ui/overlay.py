@@ -199,7 +199,7 @@ class OverlayWindow(QWidget):
         self._user_opacity = 1.0     # 用户在控制面板里设的不透明度
         # 实时跟弹高亮的刷新（有高亮才跑，平时零开销）
         self._flash_tick = QTimer(self)
-        self._flash_tick.setInterval(33)
+        self._flash_tick.setInterval(16)
         self._flash_tick.timeout.connect(self._on_flash_tick)
         self.resize(470, 580)
 
@@ -243,6 +243,9 @@ class OverlayWindow(QWidget):
         self._click_through = bool(on)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, on)
         self._apply_exstyle()
+        # 能抓的时候鼠标变"移动"样式，让人知道这里抓得住
+        self.setCursor(Qt.CursorShape.SizeAllCursor if not on
+                       else Qt.CursorShape.ArrowCursor)
 
     def _apply_exstyle(self):
         """切换「鼠标穿透」—— 两个坑都在这里填掉了。

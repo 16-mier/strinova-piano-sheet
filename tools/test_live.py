@@ -57,11 +57,37 @@ def render(seq, spb=0.5, amp=0.85):
 
 
 def main() -> int:
+    fast = '--fast' in sys.argv
+    spb = 0.09 if fast else 0.5
     seq = [('1', 1.0), ('3', 1.0), ('5', 1.0), ('6', 1.0),
-           ('1', 0.5), ('1', 0.5), ('5', 1.0)]
-    wave = render(seq)
+           ('1', 1.0), ('1', 1.0), ('5', 1.0)]
+    wave = render(seq, spb=spb)
     print('测试序列：%s' % ' '.join(p for p, _b in seq))
-    print('总长 %.1f 秒' % (len(wave) / RATE))
+    print('音符间隔 %.3f 秒（%s），总长 %.1f 秒'
+          % (spb, '快速连弹' if fast else '正常速度', len(wave) / RATE))
+
+    if '--offline' in sys.argv:
+        info: dict = {}
+        _tok, ohits = transcribe.transcribe(
+            wave, RATE, bpm=int(round(60.0 / spb)), min_margin=0.0,
+            onset_ratio=0.25, onset_min_gap=0.05, info=info)
+        print('  [离线] 起音 %d，认出 %d 个：%s'
+              % (info.get('onsets', 0), len(ohits),
+                 ' '.join(h.pitch for h in ohits)))
+
+    if '--dump' in sys.argv:
+        print('-' * 56)
+        print('逐音看窗口里的实际测量（窗口像 transcribe 那样按下一个音截断）')
+        step = int(spb * RATE)
+        for k, (p, _b) in enumerate(seq):
+            pos = k * step
+            nxt = (k + 1) * step if k + 1 < len(seq) else pos + int(0.20 * RATE)
+            end = min(pos + int(0.20 * RATE), max(pos + 2160, nxt - 288))
+            seg = wave[pos:end]
+            f, db = transcribe.estimate_f0_peak_ex(seg, RATE)
+            print('  #%d %-3s 期望 %6.1fHz  窗口 %5d  实测 %7.2fHz %5.1fdB  -> %s'
+                  % (k, p, transcribe.pitch_freq(p), len(seg), f, db,
+                     transcribe.match_key(seg, RATE)))
 
     det = LiveDetector(rate=RATE)
     got = []
@@ -74,6 +100,11 @@ def main() -> int:
             got.append((t, pitch))
             print('  +%.3fs  %-4s  %7.1f Hz'
                   % (t, pitch, freq))
+    # 收尾：把还挂在管道里的最后几个音也取出来
+    for t, pitch, freq in det.flush():
+        got.append((t, pitch))
+        print('  +%.3fs  %-4s  %7.1f Hz  (收尾)'
+              % (t, pitch, freq))
 
     print('-' * 56)
     want = [p for p, _b in seq]
@@ -107,6 +138,9 @@ def main() -> int:
         print('  上次定案 %.3f 秒' % det._last_settled_t)
         print('  已报音高：%s'
               % {k: round(v, 3) for k, v in det._last_pitch_t.items()})
+        print('  定案过的起音（%d 个）：%s'
+              % (len(det.settled),
+                 ' '.join('%.3f' % x for x in det.settled)))
         print('  被丢的 onset（%d 条）：' % len(det.rejects))
         for tt, why in det.rejects:
             print('    %6.3fs  %s' % (tt, why))
