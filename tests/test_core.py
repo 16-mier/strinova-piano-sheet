@@ -642,6 +642,36 @@ def test_transcribe_synthetic_sine():
     assert got == seq[:len(got)], '认出 %s，期望是 %s 的前缀' % (got, seq[:len(got)])
 
 
+def test_same_pitch_follows_previous_key():
+    """`8` 和 `1'` 是同一个音高的两个键，识别时**跟着上一个音走**。
+
+    它俩基频完全一样（都是 262Hz），物理上分不开。跟着上一次的选择走，
+    同一首曲子里至少是统一的，不会一会儿 `8` 一会儿 `1'`。
+    """
+    import os
+
+    import pytest
+
+    from core import synth
+    from core.paths import app_dir
+
+    notes = synth.ensure_notes(os.path.join(app_dir(), 'assets', 'notes'))
+    if '8' not in notes:
+        pytest.skip('没有游戏原始采样，跳过')
+
+    seg, _rate = _as_seg(notes['8'])
+    plain = transcribe.match_key(seg, 48000)
+    followed = transcribe.match_key(seg, 48000, prefer="1'")
+    other = transcribe.match_key(seg, 48000, prefer='5')     # 不同音高，不该乱跟
+
+    assert plain[0] == '8'                 # 没上下文时给 PAD 序号小的那个
+    assert followed[0] == "1'"             # 上一个音是 1'，就跟着用 1'
+    assert other[0] == '8'                 # 上一个音是 5（另一个音高）不影响
+    # 两个名字指的是同一个音高
+    assert math.isclose(transcribe.pitch_freq(plain[0]),
+                        transcribe.pitch_freq(followed[0]), abs_tol=1e-6)
+
+
 def test_note_samples_pitch_table():
     """把 16 个采样的实测基频打出来 —— 这是**待你在游戏里核对的清单**。
 

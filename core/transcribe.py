@@ -391,17 +391,28 @@ def key_scores(seg: np.ndarray, rate: int, offset_cents: float = 0.0,
     return out
 
 
+def _same_pitch_name(a: str, b: str, tol_cents: float = 30.0) -> bool:
+    """两个键名是不是同一个音高（比如 `8` 和 `1'`）。"""
+    if not a or not b:
+        return False
+    try:
+        return abs(1200.0 * math.log2(pitch_freq(a) / pitch_freq(b))) < tol_cents
+    except Exception:
+        return False
+
+
 def match_key(seg: np.ndarray, rate: int, offset_cents: float = 0.0,
-              max_cents: float = 60.0) -> tuple[str, float, float]:
+              max_cents: float = 60.0,
+              prefer: str = '') -> tuple[str, float, float]:
     """从琴上挑一个最像的键，返回 (音高, 理论频率, **置信度 dB**)。
 
     音高来自「最低的那根强谱峰 → 最近的键」；
     置信度就是那根柱子有多突出（见 `estimate_f0_peak_ex`）。
 
-    ★ 别再用「谐波打分第一名 vs 第二名」当置信度 ★
-      实测它对这件乐器几乎没区分度：八度关系的两个键（1 和 8）谐波大面积重合，
-      真正的琴音照样能判出负分。现在改成看谱峰锐度，真琴音 ≳ 12 dB，
-      背景音乐/人声通常 < 8 dB。
+    prefer：上一次用的是哪个键。**这次的音高要是和它一样就继续用它** ——
+      游戏里 `8` 和 `1'` 是同一个音高（都是 C4 = 262Hz）的两个键，
+      声音一模一样，识别上物理分不开。跟着上一次走，同一首曲子里至少统一，
+      不会一会儿 `8` 一会儿 `1'`。
     """
     f0, prominence = estimate_f0_peak_ex(seg, rate)
     if f0 <= 0:
@@ -409,6 +420,8 @@ def match_key(seg: np.ndarray, rate: int, offset_cents: float = 0.0,
     pitch, cents = nearest_pitch(f0, offset_cents)
     if not pitch or abs(cents) > max_cents:
         return ('', 0.0, 0.0)
+    if prefer and _same_pitch_name(prefer, pitch):
+        pitch = prefer
     return (pitch, pitch_freq(pitch), prominence)
 
 
@@ -521,6 +534,10 @@ def transcribe(audio: np.ndarray, rate: int,
     dropped = 0
     hit_margins: list[float] = []
     drop_margins: list[float] = []
+    prev_pitch = ''          # 上一个认出来的键 —— 给同音高的孪生键消歧用
+    # 同一个音高整首曲子固定用一个键名：`8` 和 `1'` 都是 C4，
+    # 声音一模一样、分不开，那就别让它在谱面里一会儿 `8` 一会儿 `1'`。
+    pitch_memo: dict[int, str] = {}
     # 窗口至少要有这么长，否则 FFT 分辨率太烂（45ms ≈ 130Hz 的 6 个周期）
     min_win = max(2048, int(0.045 * rate))
     for k, pos in enumerate(onsets):
@@ -538,13 +555,23 @@ def transcribe(audio: np.ndarray, rate: int,
         #     结果反而更差（认出 125 个 vs 原本 160 个）——
         #     衰减等于缩短有效窗长、频率分辨率跟着降，「最低谱峰」更不准了。
         #     别再走这条弯路，改用上面那个「按下一个音的远近动态截断」。
-        pitch, f_theory, margin = match_key(seg, rate, offset, max_cents)
+        pitch, f_theory, margin = match_key(seg, rate, offset, max_cents,
+                                            prefer=prev_pitch)
         # 注意：置信度可能是负的（打分第一名跟"最低谱峰"给出的音高不一致）。
         # 只有真的设了门槛（> 0）才拿它过滤，不然 min_margin=0 会误杀一片。
         if not pitch or (min_margin > 0 and margin < min_margin):
             dropped += 1
             drop_margins.append(margin)
             continue
+        # 同音高的孪生键（8 / 1'）整首曲子统一成一个名字
+        mk = int(round(f_theory * 10))
+        fixed = pitch_memo.get(mk)
+        if fixed:
+            pitch = fixed
+            f_theory = pitch_freq(pitch)
+        else:
+            pitch_memo[mk] = pitch
+
         # 偏差音分：拿「最低谱峰」跟理论值比（纯粹是显示用，不再拿来丢弃）
         f_meas = estimate_f0_peak(seg, rate) or f_theory
         cents = 1200.0 * math.log2(f_meas / f_theory)
@@ -555,6 +582,7 @@ def transcribe(audio: np.ndarray, rate: int,
         hits.append(NoteHit(time=pos / rate, pitch=pitch,
                             freq=f_theory, cents=cents))
         hit_margins.append(margin)
+        prev_pitch = pitch
 
     if info is not None:
         import statistics

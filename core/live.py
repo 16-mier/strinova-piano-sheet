@@ -40,7 +40,7 @@ from collections import deque
 
 import numpy as np
 
-from .transcribe import estimate_f0_peak, match_key
+from .transcribe import estimate_f0_peak, match_key, pitch_freq
 
 
 class LiveDetector:
@@ -86,6 +86,9 @@ class LiveDetector:
         self._waiting: list[int] = []    # 等 f0 窗口攒够的起点（绝对样本号）
         self._last_settled_t = -9.0      # 上次定案的时间（做不应期）
         self._last_pitch_t: dict[str, float] = {}
+        self._prev_pitch = ''            # 上一个认出的键（给同音高的孪生键消歧）
+        # 同一个音高固定用一个键名（`8` 和 `1'` 是同一个音高，分不开）
+        self._pitch_memo: dict[int, str] = {}
         self._rms_peak = 1e-6
         # 内部流水（排查漏音用）：(时间, 通量, 是否被当成局部峰)
         self.log: deque[tuple[float, float, bool]] = deque(maxlen=8000)
@@ -267,7 +270,8 @@ class LiveDetector:
                     (tt, '太轻 rms=%.5f < %.5f' % (rms, self._rms_peak
                                                    * self.gate_ratio)))
                 continue
-            pitch, f_theory, margin = match_key(seg, self.rate)
+            pitch, f_theory, margin = match_key(seg, self.rate,
+                                                prefer=self._prev_pitch)
             # 置信度可能是负的，只有设了门槛才拿它过滤
             if not pitch or (self.min_margin > 0
                              and margin < self.min_margin):
@@ -275,11 +279,20 @@ class LiveDetector:
                     (tt, '置信度不够 %.3f' % margin))
                 continue
             t = tt
+            # 同音高的孪生键（8 / 1'）固定用一个名字
+            mk = int(round(f_theory * 10))
+            fixed = self._pitch_memo.get(mk)
+            if fixed:
+                pitch = fixed
+                f_theory = pitch_freq(pitch)
+            else:
+                self._pitch_memo[mk] = pitch
             # 同一个音高在 dedup 秒内不重复报（抖动的第二簇会撞在这儿）
             if t - self._last_pitch_t.get(pitch, -9.0) < self.dedup_s:
                 self.rejects.append((tt, '同音高去重 %s' % pitch))
                 continue
             self._last_pitch_t[pitch] = t
+            self._prev_pitch = pitch
             out.append((t, pitch, f_theory))
         return out
 
@@ -295,6 +308,8 @@ class LiveDetector:
         self._waiting.clear()
         self.settled.clear()
         self._last_settled_t = -9.0
+        self._prev_pitch = ''
+        self._pitch_memo.clear()
         self._recent_gaps.clear()
         self._last_pitch_t.clear()
         self._rms_peak = 1e-6

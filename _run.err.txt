@@ -1,5 +1,0 @@
-qt.multimedia.ffmpeg: Using Qt multimedia with FFmpeg version 7.1.5 LGPL version 2.1 or later
-C:\Users\mier\AppData\Roaming\Python\Python314\site-packages\soundcard\mediafoundation.py:772: SoundcardRuntimeWarning: data discontinuity in recording
-  warnings.warn("data discontinuity in recording", SoundcardRuntimeWarning)
-C:\Users\mier\AppData\Roaming\Python\Python314\site-packages\soundcard\mediafoundation.py:772: SoundcardRuntimeWarning: data discontinuity in recording
-  warnings.warn("data discontinuity in recording", SoundcardRuntimeWarning)
