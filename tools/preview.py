@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""离线渲染预览 —— 不开窗口，直接把两种视图在不同时刻画成图片检查效果。
+"""离线渲染预览 —— 不开窗口，直接把网格视图在不同时刻画成图片检查效果。
 
 用法：python tools/preview.py
-输出：preview_grid_*.png / preview_fall_*.png
+输出：preview_grid_*.png
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from PyQt6.QtGui import QColor, QPainter, QPixmap  # noqa: E402
 from PyQt6.QtWidgets import QApplication          # noqa: E402
 
 from core import parser, timeline                 # noqa: E402
-from ui.views import FallView, GridView           # noqa: E402
+from ui.views import GridView                     # noqa: E402
 
 # 模拟"游戏画面"的底色，方便看清半透明面板
 FAKE_GAME = QColor(58, 68, 88)
@@ -50,19 +50,11 @@ def main() -> int:
     grid.resize(470, 580)
     grid.set_timeline(tl)
 
-    fall = FallView()
-    fall.resize(1040, 430)
-    fall.set_timeline(tl)
-
     for t in times:
         grid.set_time(t)
         cur = tl.item_at(t)
         print('t=%5.1fs  网格 <= %s' % (t, cur.chord if cur else '—'))
         composite(grid).save(os.path.join(ROOT, 'preview_grid_%.0f.png' % t))
-
-    for t in times:
-        fall.set_time(t)
-        composite(fall).save(os.path.join(ROOT, 'preview_fall_%.0f.png' % t))
 
     print('OK')
     return 0

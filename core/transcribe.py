@@ -26,9 +26,27 @@ import numpy as np
 
 from . import encode, layout
 
-# 和琴键对应的理论频率（C4 大调，中音 1 = C4）
+# 和琴键对应的理论频率（大调音阶，中音 1 = C4）
+#
+# ★ 基准音为什么是 C3 而不是通常的 C4 ★
+#   从 16 个游戏原始采样里量出来的（tools/check_notes.py）：
+#       PAD1 (`1`)  实测 130 Hz = C3
+#       PAD8 (`8`)  实测 259 Hz = C4
+#       PAD9 (`1'`) 实测 259 Hz = C4   ← 和 `8` 同音，游戏里是两个键
+#       PAD16(`1''`) 实测 521 Hz = C5
+#   也就是这台琴正好覆盖 **两个八度 C3~C5**，简谱的 `1` 在这里是 C3。
+#   之前按"1 = C4"算，整张频率表高了一个八度，识别时高音区全乱套。
 _SEMI = [0, 2, 4, 5, 7, 9, 11]
-_BASE = 261.6255653
+_BASE = 130.81278265        # C3
+
+# 识别出来的音符，本体最多占这么多拍（超出的时间写成休止符）
+MAX_NOTE_BEATS = 1.0
+
+# 置信度门槛的默认值。实测（B站视频那种带背景音乐的素材）：
+#   真琴音的「第一名 vs 第二名」分差中位数 ≈ 0.48
+#   背景音乐片段的中位数 ≈ 0.10
+#   所以卡在中间偏下一点，既能滤掉伴奏，又不至于把弱音也扔了。
+DEFAULT_MIN_MARGIN = 0.25
 
 
 def pitch_freq(pitch: str) -> float:
@@ -54,6 +72,16 @@ def pitch_freq(pitch: str) -> float:
 KEY_FREQS: list[tuple[str, float]] = [
     (p, pitch_freq(p)) for p in layout.all_pitches()
 ]
+
+# 唯一音高表 —— 同音高的键只留一个代表（PAD 序号最小的那个）。
+# 游戏里 `8` 和 `1'` 是同一个音高的两个键，识别上天然分不开；
+# 与其每次随机挑一个，不如固定输出 `8`，这样谱面至少是稳定的。
+UNIQUE_KEYS: list[tuple[str, float]] = []
+for _p, _f in KEY_FREQS:
+    if any(abs(1200.0 * math.log2(_f / _g)) < 50.0
+           for _q, _g in UNIQUE_KEYS):
+        continue
+    UNIQUE_KEYS.append((_p, _f))
 
 
 @dataclass
@@ -196,16 +224,186 @@ def f0_hps(seg: np.ndarray, rate: int,
     return float(freqs[k])
 
 
-def nearest_pitch(freq: float) -> tuple[str, float]:
-    """把频率匹配到琴上最近的键，返回 (音高, 偏差音分)。"""
+def nearest_pitch(freq: float, offset_cents: float = 0.0) -> tuple[str, float]:
+    """把频率匹配到琴上最近的键，返回 (音高, 偏差音分)。
+
+    offset_cents = 已知的整体跑调量（正数 = 实测偏高）。
+    扣掉它之后再比，返回的也是扣掉之后的残差 —— 这样"整体升了 60 音分"
+    的录音不会被硬塞到隔壁键上去。
+    """
     if freq <= 0:
         return ('', 0.0)
-    best_p, best_cents = KEY_FREQS[0][0], 1e9
+    best_p, best_c = KEY_FREQS[0][0], 1e9
     for p, f in KEY_FREQS:
-        cents = 1200.0 * math.log2(freq / f)
-        if abs(cents) < abs(best_cents):
-            best_p, best_cents = p, cents
-    return (best_p, best_cents)
+        c = 1200.0 * math.log2(freq / f) - offset_cents
+        if abs(c) < abs(best_c):
+            best_p, best_c = p, c
+    return (best_p, best_c)
+
+
+def estimate_f0_peak(seg: np.ndarray, rate: int,
+                     ratio: float = 0.15,
+                     fmin: float = 60.0) -> float:
+    """估基频：幅度谱里**最低的那根够强的柱子**。
+
+    ★ 为什么这件乐器用这个而不是 HPS ★
+      这些采样里同时存在基频、半频和一堆相邻的峰（130 和 258/261 并存），
+      HPS 那种"把整数倍频率的谱值连乘"的办法会被带跑 ——
+      实测它把 `1`(130Hz) 认成 261Hz、把 `6`(219Hz) 认成 439Hz，正好差八度。
+      而"最低的那根柱子就是基频"这条朴素规则，16 个采样全部命中。
+    """
+    x = np.asarray(seg, dtype=np.float64)
+    if x.ndim > 1:
+        x = x.mean(axis=1)
+    x = x - x.mean()
+    m = len(x)
+    if m < 256 or not np.any(x) or rate <= 0:
+        return 0.0
+    spec = np.abs(np.fft.rfft(x * np.hanning(m)))
+    if spec.max() <= 0:
+        return 0.0
+    freqs = np.fft.rfftfreq(m, 1.0 / rate)
+    thr = float(spec.max()) * ratio
+    for i in range(2, len(spec) - 2):
+        if freqs[i] < fmin:
+            continue
+        if (spec[i] >= spec[i - 1] and spec[i] >= spec[i + 1]
+                and spec[i] > thr):
+            return float(freqs[i])
+    return 0.0
+
+
+def key_scores(seg: np.ndarray, rate: int, offset_cents: float = 0.0,
+               harmonics: int = 3) -> list[tuple[str, float, float]]:
+    """给琴上 16 个键各打一个「像不像」的分（对数域，越大越像）。
+
+    ★ 为什么不用「先估基频再找最近的键」★
+      那样一遇到谐波干扰就会估出个 220Hz 来（440 的一半，HPS 的老毛病），
+      然后匹配到完全不相干的键上。
+
+    ★ 为什么谐波只数前 3 个 ★（这个是实测踩出来的）
+      数到 8 个的时候，高音区**全被认成低八度**：`1'` 的信号在 523/1046
+      上有能量，而 `1` 的模板正好把 523/1046 当成自己的 2 次、4 次谐波，
+      两边的分数咬得极近；再往后高音键的 5~8 次谐波早就超出有效带宽、
+      只剩噪声，把它的平均分往下拖，于是低八度反超。
+      砍到 3 个谐波，"基频在哪儿"就成了决定因素，八度问题当场消失。
+    """
+    x = np.asarray(seg, dtype=np.float64)
+    if x.ndim > 1:
+        x = x.mean(axis=1)
+    x = x - x.mean()
+    m = len(x)
+    if m < 256 or not np.any(x) or rate <= 0:
+        return []
+    spec = np.abs(np.fft.rfft(x * np.hanning(m)))
+    if spec.max() <= 0:
+        return []
+    n_bins = len(spec)
+    scale = 2.0 ** (offset_cents / 1200.0)
+    # 太弱的谐波别拿 1e-12 去罚它（那会把平均值拖到 -27），
+    # 统一按「比峰值低 80 分贝」算就够了。
+    floor = float(spec.max()) * 1e-4
+
+    out: list[tuple[str, float, float]] = []
+    for pitch, f0 in UNIQUE_KEYS:
+        f = f0 * scale
+        logsum = 0.0
+        wsum = 0.0
+        for h in range(1, harmonics + 1):
+            k = int(round(f * h * m / float(rate)))
+            if k <= 0 or k >= n_bins:
+                break
+            v = max(float(spec[max(0, k - 1):k + 2].max()), floor)
+            # ★ 基频说话最算数，谐波越远越只是参考 ★
+            #   因为八度关系的两个键（1 和 8、5 和 5'）谐波大面积重合，
+            #   不偏袒基频的话两者分数会咬得死死的，来回乱跳。
+            w = 1.0 / h
+            logsum += w * math.log(v)
+            wsum += w
+        if wsum <= 0:
+            continue
+        out.append((pitch, logsum / wsum, f0))    # 加权平均
+    out.sort(key=lambda t: -t[1])
+    return out
+
+
+def match_key(seg: np.ndarray, rate: int, offset_cents: float = 0.0
+              ) -> tuple[str, float, float]:
+    """从琴上挑一个最像的键，返回 (音高, 理论频率, 置信度)。
+
+    音高来自「最低的强谱峰」（对这 16 个采样最稳），
+    置信度来自谐波打分（第一名和第二名的分差，越大越可信）——
+    背景音乐那种「哪个键都不像」的片段，这个值会很小。
+    """
+    f0 = estimate_f0_peak(seg, rate)
+    if f0 <= 0:
+        return ('', 0.0, 0.0)
+    pitch, _cents = nearest_pitch(f0, offset_cents)
+    if not pitch:
+        return ('', 0.0, 0.0)
+
+    margin = 0.0
+    sc = key_scores(seg, rate, offset_cents)
+    if sc:
+        d = {p: s for p, s, _f in sc}
+        mine = d.get(pitch)
+        if mine is not None:
+            others = [s for p, s in d.items() if p != pitch]
+            margin = mine - (max(others) if others else mine)
+    return (pitch, pitch_freq(pitch), margin)
+
+
+def estimate_offset_cents(freqs) -> float:
+    """估整体跑调多少音分 —— B 站视频转码 / 变速常常整体偏高偏低。
+
+    做法：把每个频率换成 MIDI 音高，只看它的小数部分（也就是"离最近的
+    半音差多少"），然后求**圆形平均**。为什么不用普通平均：
+    -0.49 和 +0.49 明明差不多，算术平均却会得到 0。
+    """
+    vals = [f for f in freqs if f and f > 0]
+    if len(vals) < 4:
+        return 0.0
+    fracs = []
+    for f in vals:
+        midi = 69.0 + 12.0 * math.log2(f / 440.0)
+        fracs.append(midi - round(midi))
+    two_pi = 2.0 * math.pi
+    s = sum(math.sin(two_pi * x) for x in fracs)
+    c = sum(math.cos(two_pi * x) for x in fracs)
+    if abs(s) < 1e-12 and abs(c) < 1e-12:
+        return 0.0
+    return math.atan2(s, c) / two_pi * 100.0
+
+
+def guess_bpm(audio: np.ndarray, rate: int,
+              lo: int = 55, hi: int = 200) -> int:
+    """从起音间隔粗猜曲速（拍/分）。
+
+    只为了把间隔量化成好看的拍数 —— 猜得不准用户还能手改。
+    原理：所有间隔都应该是「十六分音符」的整数倍，扫一遍 BPM 看哪个最贴合。
+    """
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    onsets = detect_onsets(np.asarray(audio, dtype=np.float64), rate)
+    if len(onsets) < 6:
+        return 0
+    d = np.diff(np.asarray(onsets, dtype=np.float64)) / float(rate)
+    d = d[(d > 0.05) & (d < 3.0)]
+    if len(d) < 5:
+        return 0
+
+    best_bpm, best_score = 0, -1e18
+    for bpm in range(lo, hi + 1):
+        unit = 60.0 / bpm / 4.0                 # 十六分音符多长
+        r = d / unit
+        err = np.abs(r - np.round(r))
+        score = float(np.sum(np.clip(1.0 - err / 0.15, 0.0, 1.0)))
+        if np.sum(err < 0.15) < 3:              # 贴合的太少，不信
+            continue
+        score -= abs(bpm - 120) * 1e-3          # 同样贴合时挑靠近 120 的
+        if score > best_score:
+            best_score, best_bpm = score, bpm
+    return best_bpm
 
 
 # ---------------------------------------------------------------- 主流程
@@ -213,8 +411,11 @@ def nearest_pitch(freq: float) -> tuple[str, float]:
 def transcribe(audio: np.ndarray, rate: int,
                bpm: int = 120,
                snap: float = 0.25,
-               win_s: float = 0.10,
-               max_cents: float = 60.0) -> tuple[list[str], list[NoteHit]]:
+               win_s: float = 0.20,
+               max_cents: float = 60.0,
+               min_margin: float = DEFAULT_MIN_MARGIN,
+               calibrate: bool = True,
+               info: dict | None = None) -> tuple[list[str], list[NoteHit]]:
     """把音频转成 (token 列表, 识别详情)。
 
     参数
@@ -222,6 +423,10 @@ def transcribe(audio: np.ndarray, rate: int,
         snap   量化精度（拍），0.25 = 十六分音符
         win_s  每个音取多长来分析音高
         max_cents  偏差超过这么多音分就当作"不是琴声"丢掉
+        min_margin 置信度（第一名和第二名的分差）低于这个就丢掉 ——
+                   调高能滤掉背景音乐，调低能多捞回弱音
+        calibrate  先估一次整体跑调量再匹配（B站视频转码/变速常整体偏）
+        info   传个 dict 进来的话，会把诊断信息写进去
     """
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
@@ -236,15 +441,60 @@ def transcribe(audio: np.ndarray, rate: int,
     spb = 60.0 / max(1, bpm)
     win = max(256, int(win_s * rate))
 
+    # ★ 先粗采一遍基频，看整体跑调多少 ★
+    #   不先校正的话，整体偏 60 音分的录音会被硬塞到隔壁键上，整首全错。
+    offset = 0.0
+    if calibrate:
+        step = max(1, len(onsets) // 60)
+        rough = []
+        for pos in onsets[::step]:
+            f0 = f0_hps(a[pos:pos + win], rate)
+            if f0 > 0:
+                rough.append(f0)
+        offset = estimate_offset_cents(rough)
+
     hits: list[NoteHit] = []
+    dropped = 0
+    hit_margins: list[float] = []
+    drop_margins: list[float] = []
     for pos in onsets:
         seg = a[pos:pos + win]
-        f0 = f0_hps(seg, rate)
-        pitch, cents = nearest_pitch(f0)
-        if not pitch or abs(cents) > max_cents:
+        pitch, f_theory, margin = match_key(seg, rate, offset)
+        # 注意：置信度可能是负的（打分第一名跟"最低谱峰"给出的音高不一致）。
+        # 只有真的设了门槛（> 0）才拿它过滤，不然 min_margin=0 会误杀一片。
+        if not pitch or (min_margin > 0 and margin < min_margin):
+            dropped += 1
+            drop_margins.append(margin)
+            continue
+        # 偏差音分：拿「最低谱峰」跟理论值比。
+        # ⚠ 别用 f0_hps —— 它对谐波少的音（甚至纯正弦）会给出离谱的值。
+        f_meas = estimate_f0_peak(seg, rate) or f_theory
+        cents = 1200.0 * math.log2(f_meas / f_theory)
+        while cents > 600.0:
+            cents -= 1200.0
+        while cents < -600.0:
+            cents += 1200.0
+        if abs(cents) > max_cents:
+            dropped += 1
+            drop_margins.append(margin)
             continue
         hits.append(NoteHit(time=pos / rate, pitch=pitch,
-                            freq=f0, cents=cents))
+                            freq=f_theory, cents=cents))
+        hit_margins.append(margin)
+
+    if info is not None:
+        import statistics
+        info['offset_cents'] = offset
+        info['onsets'] = len(onsets)
+        info['dropped'] = dropped
+        info['seconds'] = len(a) / float(rate)
+        if hit_margins:
+            info['margin_hit'] = statistics.median(hit_margins)
+        if drop_margins:
+            info['margin_drop'] = statistics.median(drop_margins)
+        if hit_margins and drop_margins:
+            allm = sorted(hit_margins + drop_margins)
+            info['margin_all'] = allm
 
     if not hits:
         return ([], [])
@@ -262,23 +512,30 @@ def transcribe(audio: np.ndarray, rate: int,
         q = round(gap / snap) * snap
         h.beats = max(snap, q)
 
+    # ★ 音符本身最多占 MAX_NOTE_BEATS 拍，多出来的时间写成休止符 ★
+    #   不这么干的话，"弹一下 → 停 10 拍"会被写成一个 10 拍的超长音
+    #   （`3----------`），读起来莫名其妙，时间轴上也是一根巨型色块。
     tokens: list[str] = []
+    cursor = 0.0
     for h in hits:
         b = round(h.beat / snap) * snap
-        tokens.append(encode.token_for(h.beats, h.pitch))
-
-    # 开头的空档补休止符
-    lead = round(hits[0].beat / snap) * snap
-    if lead > 1e-6:
-        tokens = encode.split_gap(lead) + tokens
+        pause = b - cursor
+        if pause > 1e-6:
+            tokens.extend(encode.split_gap(pause))
+        note_beats = max(snap, min(h.beats, MAX_NOTE_BEATS))
+        tokens.append(encode.token_for(note_beats, h.pitch))
+        cursor = b + note_beats
 
     return (tokens, hits)
 
 
 def to_sheet_text(audio: np.ndarray, rate: int, bpm: int = 120,
-                  snap: float = 0.25, title: str = '听音记谱') -> tuple[str, list[NoteHit]]:
+                  snap: float = 0.25, title: str = '听音记谱',
+                  min_margin: float = DEFAULT_MIN_MARGIN,
+                  info: dict | None = None) -> tuple[str, list[NoteHit]]:
     """直接生成可以贴进编辑器的谱面文本。"""
-    tokens, hits = transcribe(audio, rate, bpm=bpm, snap=snap)
+    tokens, hits = transcribe(audio, rate, bpm=bpm, snap=snap,
+                              min_margin=min_margin, info=info)
     if not tokens:
         return ('', [])
     body = ' '.join(tokens)

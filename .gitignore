@@ -6,5 +6,9 @@ dist/
 config.json
 run.err
 run.out
+_dbg.txt
+_rec.txt
 preview_*.png
 shot_*.png
+assets/notes_raw/
+assets/notes_game/

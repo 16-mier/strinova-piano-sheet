@@ -20,18 +20,34 @@ import threading
 
 import numpy as np
 
-try:
-    import soundcard as sc
-except Exception:                     # pragma: no cover
-    sc = None
+# ★ soundcard 必须延迟导入 ★
+#   它在导入时就会把线程的 COM 初始化成 MTA，而 Qt 需要 STA ——
+#   一旦在 QApplication 之前导入，Qt 启动会直接失败：
+#       QWindowsContext: OleInitialize() failed: COM error 0x80010106
+#   所以改成"真正要录音时才加载"。
+_sc = None
+_sc_tried = False
+
+
+def _soundcard():
+    global _sc, _sc_tried
+    if not _sc_tried:
+        _sc_tried = True
+        try:
+            import soundcard as sc
+            _sc = sc
+        except Exception:
+            _sc = None
+    return _sc
 
 
 def available() -> bool:
-    return sc is not None
+    return _soundcard() is not None
 
 
 def list_output_devices() -> list[tuple[str, str]]:
     """能用来做 loopback 的输出设备：[（显示名, 设备id）]。"""
+    sc = _soundcard()
     if sc is None:
         return []
     out: list[tuple[str, str]] = []
@@ -58,6 +74,7 @@ class LoopbackRecorder:
     # ---------------- 控制 ----------------
 
     def start(self, device_id: str, channels: int = 2) -> bool:
+        sc = _soundcard()
         if sc is None:
             self.last_error = 'soundcard 库没装（pip install soundcard）'
             return False
@@ -141,6 +158,77 @@ class LoopbackRecorder:
         with self._lock:
             n = sum(len(c) for c in self._chunks)
         return n / max(1, self.samplerate)
+
+
+class LoopbackStream:
+    """一直录，把音频块交给回调 —— 实时跟弹用。
+
+    和 `LoopbackRecorder` 的区别：那个是"攒完这一整段再给你"，
+    这个是"每 20 毫秒给你一小块"，适合边听边认。
+    """
+
+    def __init__(self, on_block, blocksize: int = 1024,
+                 samplerate: int = 48000):
+        self.on_block = on_block
+        self.blocksize = int(blocksize)
+        self.samplerate = int(samplerate)
+        self.running = False
+        self.last_error = ''
+        self._thread: threading.Thread | None = None
+        self._ready = threading.Event()
+
+    def start(self, device_id: str, channels: int = 2) -> bool:
+        sc = _soundcard()
+        if sc is None:
+            self.last_error = 'soundcard 库没装（pip install soundcard）'
+            return False
+        if self.running:
+            return True
+        try:
+            mic = sc.get_microphone(id=device_id, include_loopback=True)
+        except Exception as e:
+            self.last_error = '找不到这个设备：%r' % e
+            return False
+        if mic is None:
+            self.last_error = '找不到这个设备'
+            return False
+        self.last_error = ''
+        self.running = True
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._run,
+                                        args=(mic, channels), daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=2.0)
+        return self.running
+
+    def _run(self, mic, channels: int):
+        try:
+            with mic.recorder(samplerate=self.samplerate, channels=channels,
+                              blocksize=self.blocksize) as rec:
+                self._ready.set()
+                while self.running:
+                    data = rec.record(numframes=self.blocksize)
+                    if data is None or not len(data):
+                        continue
+                    try:
+                        self.on_block(np.asarray(data, dtype=np.float64))
+                    except Exception:
+                        pass          # 回调里出错不能把录音线程弄死
+        except Exception as e:
+            self.last_error = str(e)
+        finally:
+            self.running = False
+            try:
+                self._ready.set()
+            except Exception:
+                pass
+
+    def stop(self):
+        self.running = False
+        t = self._thread
+        if t is not None:
+            t.join(timeout=1.5)
+            self._thread = None
 
 
 def find_device_id(keyword: str) -> str | None:

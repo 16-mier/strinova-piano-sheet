@@ -9,14 +9,52 @@
 于是拖动某个音符 = 改动它前面那串休止符的总拍数。
 原样保留每个音符的 `raw`（`1'&3'`、`^^1--` 这些写法一个字节都不动），
 只重新生成休止符 —— 这样用户的原始谱面不会被"规范化"得面目全非。
+
+和弦（同一时刻一起响的多个音）
+------------------------------
+顺序模型里两个块**永远不可能同时开始**（后一个的起点 ≥ 前一个的终点）。
+所以"同时发声"只能靠**把音并进同一个 token**：`1&3&5`。
+`merge_into_prev()` 干的就是这件事 —— 把后一个块的音高揉进前一个块，
+两边的节奏修饰符（^ - ~）都保住。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import encode
+from . import encode, layout
 from .parser import BpmChange, Sheet
+
+# token 的「本体」字符 —— 其余的都算节奏/装饰符
+_BODY_CHARS = set("0123456789#.'")
+
+
+def split_raw(raw: str) -> tuple[str, str, str]:
+    """token -> (前导 ^, 音高本体, 尾部修饰)。
+
+    `^^1'&3'--` -> ('^^', "1'&3'", '--')
+    `1^`        -> ('', '1', '^')
+    """
+    n = len(raw)
+    i = 0
+    while i < n and raw[i] == '^':
+        i += 1
+    j = n
+    while j > i and raw[j - 1] not in _BODY_CHARS:
+        j -= 1
+    return raw[:i], raw[i:j], raw[j:]
+
+
+def make_raw(raw: str, pitches) -> str:
+    """只换掉 token 的音高部分，节奏/装饰符一个字节不动。"""
+    head, _body, tail = split_raw(raw)
+    return head + '&'.join(pitches) + tail
+
+
+def pitch_order(pitch: str) -> int:
+    """按琴上的 PAD 序号排序 —— 和弦里的音永远从低到高写，读起来一致。"""
+    pad = layout.pitch_to_pad(pitch)
+    return pad if pad is not None else 999
 
 
 def is_bpm_token(tok: str) -> bool:
@@ -51,6 +89,7 @@ class EditModel:
         self.title = sheet.title
         self.notes: list[EdNote] = []
         self.total_beats = 0.0
+        self.snap_merge = 0.13      # 拖到前一音起点 ±这个拍数内就并成和弦
         self._build(sheet)
 
     # ---------------- 构建 ----------------
@@ -174,6 +213,145 @@ class EditModel:
             return
         self.notes.pop(i)
         self._reflow(max(0, i - 1))
+
+    # ---------------- 和弦（同一时刻一起响） ----------------
+
+    def note_starting_at(self, beat: float,
+                         tol: float = 0.2) -> EdNote | None:
+        """起点落在 beat ± tol 内的音符块（取最近的）。"""
+        best, best_d = None, 1e9
+        for n in self.notes:
+            if n.is_rest:
+                continue
+            d = abs(n.start - beat)
+            if d <= tol and d < best_d:
+                best, best_d = n, d
+        return best
+
+    def note_at(self, beat: float) -> EdNote | None:
+        """正在覆盖 beat 那一刻的音符块。"""
+        for n in self.notes:
+            if not n.is_rest and n.start - 1e-9 <= beat < n.end - 1e-9:
+                return n
+        return None
+
+    def set_pitches(self, note: EdNote, pitches) -> bool:
+        """重设一个块的音高（去重 + 按 PAD 序号排序 + 重写 raw）。"""
+        if self.index_of(note) < 0:
+            return False
+        uniq: list[str] = []
+        for p in pitches:
+            if p and p not in uniq:
+                uniq.append(p)
+        if not uniq:
+            return False
+        note.pitches = sorted(uniq, key=pitch_order)
+        note.raw = make_raw(note.raw, note.pitches)
+        return True
+
+    def add_pitch(self, note: EdNote, pitch: str) -> bool:
+        """再往块里塞一个音（= 同时按下）；已经在里面就返回 False。"""
+        if pitch in note.pitches:
+            return False
+        return self.set_pitches(note, list(note.pitches) + [pitch])
+
+    def remove_pitch(self, note: EdNote, pitch: str) -> bool:
+        """从块里拿掉一个音；拿光了整块一起删。"""
+        if pitch not in note.pitches:
+            return False
+        left = [p for p in note.pitches if p != pitch]
+        if not left:
+            return self.remove_note_index(self.index_of(note))
+        return self.set_pitches(note, left)
+
+    def remove_note_index(self, i: int) -> bool:
+        if not (0 <= i < len(self.notes)):
+            return False
+        self.notes.pop(i)
+        self._reflow(max(0, i - 1))
+        return True
+
+    def merge_into_prev(self, i: int) -> EdNote | None:
+        """把第 i 个块并进前一个音符 —— 变成和弦（同一时刻一起响）。
+
+        返回合并后的那个块；合不了返回 None。
+        """
+        if not (0 <= i < len(self.notes)):
+            return None
+        src = self.notes[i]
+        if src.is_rest:
+            return None
+        j = i - 1
+        while j >= 0 and self.notes[j].is_rest:
+            j -= 1
+        if j < 0:
+            return None
+        dst = self.notes[j]
+        # 1) 先删掉两者之间的休止符（空档归零）
+        del self.notes[j + 1:i]
+        # 2) 时值取长的那个 —— 不然音乐会莫名其妙变快
+        if src.dur > dst.dur + 1e-9:
+            self.set_dur_of(dst, src.dur)
+        # 3) 音高揉进去
+        self.set_pitches(dst, list(dst.pitches) + list(src.pitches))
+        # 4) 删掉被并掉的那块
+        self.notes.remove(src)
+        self._reflow(j)
+        return dst
+
+    def split_pitch_out(self, note: EdNote, pitch: str) -> EdNote | None:
+        """把和弦里的某个音拆出来，变成紧跟其后的独立块。"""
+        i = self.index_of(note)
+        if i < 0 or pitch not in note.pitches or len(note.pitches) < 2:
+            return None
+        dur = note.dur
+        self.remove_pitch(note, pitch)
+        if self.index_of(note) < 0:
+            return None
+        self.insert_tokens(i + 1, [encode.token_for(dur, pitch)])
+        return self.notes[i + 1] if i + 1 < len(self.notes) else None
+
+    def set_dur_of(self, note: EdNote, dur: float) -> bool:
+        """改一个块的时值（重编码它的节奏部分，音高和 ~ 原样保留）。"""
+        i = self.index_of(note)
+        if i < 0:
+            return False
+        dur = max(0.03125, float(dur))
+        _head, _body, tail = split_raw(note.raw)
+        keep = ''.join(ch for ch in tail if ch == '~')
+        c, d, actual = encode.encode_duration(dur, is_rest=False)
+        note.raw = '^' * c + '&'.join(note.pitches) + keep + '-' * d
+        note.dur = actual
+        self._reflow(i)
+        return True
+
+    def move_to_beat(self, note: EdNote, want_start: float) -> EdNote | None:
+        """把块挪到 want_start 那一拍（拖动音符走的就是这里）。
+
+        * 落在前一个音的起点附近 -> **并成和弦**（同时发声）
+        * 拖过头压到前一个音身上 -> 紧贴着它（间距归零）
+        * 其它                   -> 老老实实改间距
+
+        返回操作之后「该被选中」的块（合并时是前面那个块）。
+        """
+        i = self.index_of(note)
+        if i < 0 or note.is_rest:
+            return None
+        want_start = max(0.0, float(want_start))
+        j = i - 1
+        while j >= 0 and self.notes[j].is_rest:
+            j -= 1
+        if j < 0:
+            self.set_gap(i, want_start)
+            return note
+        prev = self.notes[j]
+        if abs(want_start - prev.start) <= self.snap_merge + 1e-9:
+            return self.merge_into_prev(i)
+        if want_start < prev.end - 1e-9:
+            self.set_gap(i, 0.0)
+            return note
+        self.set_gap(i, want_start - prev.end)
+        return note
 
     # ---------------- 区域操作 ----------------
 

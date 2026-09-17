@@ -56,6 +56,9 @@ GAP_CHOICES = [
     ('4 拍', 4.0),
 ]
 
+CHORD_TOL = 0.2         # 播放头落在某个音起点 ±这个拍数内 = 叠成和弦
+UNDO_MAX = 60           # 撤销栈存多少步
+
 
 def tokens_for(pitch: str, gap: float) -> list[str]:
     """按「间距」生成要插入的 token 序列。
@@ -80,6 +83,8 @@ class EditorDialog(QDialog):
         self.saved = False
         self.model: EditModel | None = None
         self._syncing = False
+        self._undo: list[str] = []
+        self._applying = False          # 正在回滚，别再记一笔
 
         self.setWindowTitle('打谱器')
         self.resize(1240, 840)
@@ -148,8 +153,9 @@ class EditorDialog(QDialog):
         self.tl_scroll.setMinimumHeight(16 * 24 + 60)
         self.tl_scroll.setStyleSheet('QScrollArea{border:1px solid #2c3346;}')
 
-        tl_box = QGroupBox('时间轴（拖动音符改间距 · Ctrl+滚轮缩放 · '
-                           '双击音符从这里播）')
+        tl_box = QGroupBox('时间轴：拖音符挪位置，拖到前一个音头上就并成和弦'
+                           '（同时响）· 拖右边缘改时长 · 右键拿掉一个音 · '
+                           '按住红线拖播放头 · 空白处拖 = 框选')
         tlb = QVBoxLayout(tl_box)
         tlb.addWidget(self.tl_scroll, 1)
 
@@ -164,9 +170,11 @@ class EditorDialog(QDialog):
         self.btn_del_sel = QPushButton('🗑  删除选区')
         self.btn_sel_all = QPushButton('全选')
         self.btn_clear_sel = QPushButton('取消选区')
+        self.btn_undo = QPushButton('↶  撤销')
+        self.btn_undo.setToolTip('按 Ctrl+Z 也行（焦点在时间轴上时）')
         self.btn_clear_all = QPushButton('全删')
         for b in (self.btn_play_sel, self.btn_del_sel, self.btn_sel_all,
-                  self.btn_clear_sel, self.btn_clear_all):
+                  self.btn_clear_sel, self.btn_undo, self.btn_clear_all):
             b.setFixedHeight(30)
         self.btn_clear_all.setStyleSheet(
             'QPushButton{color:#ff9a9a;}')
@@ -184,6 +192,7 @@ class EditorDialog(QDialog):
         rowp.addSpacing(10)
         rowp.addWidget(self.btn_sel_all)
         rowp.addWidget(self.btn_clear_sel)
+        rowp.addWidget(self.btn_undo)
         rowp.addWidget(self.btn_clear_all)
         rowp.addSpacing(10)
         rowp.addWidget(self.lbl_pos, 1)
@@ -195,7 +204,9 @@ class EditorDialog(QDialog):
         self.cmb_write.addItem('写入位置：谱面文本光标', 'cursor')
         self.cmb_write.setToolTip(
             '时间轴播放头：在下面时间轴上点一下定位，再敲打击垫，'
-            '音符就插在那儿（可以配合选区）\n'
+            '音符就插在那儿\n'
+            '　★ 如果那一拍已经有音了，敲下去就是**叠成和弦**（一起响），'
+            '不会占新的时间\n'
             '谱面文本光标：跟你手写文本一样，插在光标处')
         rowq = QHBoxLayout()
         rowq.addWidget(self.cmb_write)
@@ -262,7 +273,9 @@ class EditorDialog(QDialog):
         self.text.textChanged.connect(self._on_text_changed)
         self.tl_edit.changed.connect(self._on_timeline_changed)
         self.tl_edit.playhead_moved.connect(self._on_playhead)
+        self.tl_edit.playhead_dropped.connect(self._on_playhead_dropped)
         self.tl_edit.seek_requested.connect(self._play_from_beat)
+        self.tl_edit.undo_requested.connect(self._push_undo)
 
         self.btn_play.clicked.connect(
             lambda: self._play_from_beat(self.tl_edit.playhead))
@@ -274,6 +287,7 @@ class EditorDialog(QDialog):
         self.btn_del_sel.clicked.connect(self._delete_selection)
         self.btn_sel_all.clicked.connect(self.tl_edit.select_all)
         self.btn_clear_sel.clicked.connect(self.tl_edit.clear_selection)
+        self.btn_undo.clicked.connect(self._undo_once)
         self.btn_clear_all.clicked.connect(self._clear_all)
         self.tl_edit.selection_changed.connect(self._update_sel_label)
         self.btn_save.clicked.connect(self.save)
@@ -288,26 +302,70 @@ class EditorDialog(QDialog):
         if not self.chk_insert.isChecked():
             return
         gap = float(self.cmb_gap.currentData() or 1.0)
-        toks = tokens_for(pitch, gap)
 
         if self.cmb_write.currentData() == 'head' and self.model is not None:
-            # 写进时间轴 —— 落在播放头（有选区就落选区起点）那里
+            # 写进时间轴 —— 落在播放头（有选区就落选区起点）那一拍
             rng = self.tl_edit.selection_beats()
             at = rng[0] if rng else self.tl_edit.playhead
+
+            # ★ 那一拍已经有音了？那就**叠上去变成和弦**（同时发声），
+            #   不占新的时间 —— 这就是「一个时间里放好几个音」的入口。
+            target = self.model.note_starting_at(at, tol=CHORD_TOL)
+            if (target is not None and pitch not in target.pitches):
+                self._push_undo()
+                self.model.add_pitch(target, pitch)
+                self._sync_model(target.start)
+                self.lbl_pos.setText(
+                    '叠成和弦 <b>%s</b>（第 %.2f 拍，一起响）'
+                    % (target.label, target.start))
+                return
+
+            self._push_undo()
+            toks = tokens_for(pitch, gap)
             idx = self.model.rest_index_after_beat(at)
             self.model.insert_tokens(idx, toks)
-
             total = sum(parser.token_duration(t)[0] for t in toks)
-            self._syncing = True
-            self.text.setPlainText(self.model.rebuild())
-            self._syncing = False
-            self.player.set_model(self.model)
-            self.tl_edit.set_model_keep_head(self.model, at + total)
-            self._update_info(None)
+            self._sync_model(at + total)
             return
 
         # 写进谱面文本的光标处
-        self._insert(' '.join(toks) + ' ')
+        self._insert(' '.join(tokens_for(pitch, gap)) + ' ')
+
+    def _sync_model(self, head: float):
+        """把模型改动同步到文本 / 播放器 / 时间轴，播放头停在 head 拍。"""
+        self._syncing = True
+        self.text.setPlainText(self.model.rebuild())
+        self._syncing = False
+        self.player.set_model(self.model)
+        self.tl_edit.set_model_keep_head(self.model, head)
+        self._update_info(None)
+
+    # ---------------- 撤销 ----------------
+
+    def _push_undo(self):
+        """改谱之前先存一份快照（Ctrl + Z 用）。"""
+        if self._applying:
+            return
+        txt = self.text.toPlainText()
+        if self._undo and self._undo[-1] == txt:
+            return
+        self._undo.append(txt)
+        if len(self._undo) > UNDO_MAX:
+            self._undo.pop(0)
+
+    def _undo_once(self):
+        if not self._undo:
+            self.lbl_pos.setText('没有可撤销的步骤了')
+            return
+        txt = self._undo.pop()
+        head = self.tl_edit.playhead
+        self._applying = True
+        self._syncing = True
+        self.text.setPlainText(txt)
+        self._syncing = False
+        self._applying = False
+        self._refresh_from_text(keep_head=head)
+        self.lbl_pos.setText('已撤销上一步')
 
     def _insert(self, s: str):
         cur = self.text.textCursor()
@@ -321,10 +379,13 @@ class EditorDialog(QDialog):
             return
         self._debounce.start()
 
-    def _refresh_from_text(self):
+    def _refresh_from_text(self, keep_head: float | None = None):
         sheet = parser.parse(self.text.toPlainText())
         self.model = EditModel(sheet)
-        self.tl_edit.set_model(self.model)
+        if keep_head is None:
+            self.tl_edit.set_model(self.model)
+        else:
+            self.tl_edit.set_model_keep_head(self.model, keep_head)
         self.player.set_model(self.model)
         self.player.bpm = self._bpm(sheet)
         self._update_info(sheet)
@@ -398,6 +459,7 @@ class EditorDialog(QDialog):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if r != QMessageBox.StandardButton.Yes:
             return
+        self._push_undo()
         self.model.clear_all()
         self._syncing = True
         self.text.setPlainText('')
@@ -427,6 +489,11 @@ class EditorDialog(QDialog):
     def _on_playhead(self, beat: float):
         total = self.model.total_beats if self.model else 0.0
         self.lbl_pos.setText('位置：第 %.2f 拍 / 共 %.2f 拍' % (beat, total))
+
+    def _on_playhead_dropped(self, beat: float):
+        """拖红线松手 —— 正在播的话就从新位置接着播。"""
+        if self.player.playing:
+            self._play_from_beat(beat)
 
     # ---------------- 文件 ----------------
 

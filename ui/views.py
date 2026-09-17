@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
-"""两种谱面显示。
+"""谱面显示 —— 4×4 网格高亮式。
 
-GridView  4×4 网格高亮式 —— 跟游戏里那台琴的排列一模一样，当前该打的键亮黄
-FallView  下落式 —— 16 条轨道，音符从上往下掉，落到底部判定线就是该打的时候
+GridView  跟游戏里那台琴的排列一模一样；当前该打的键亮黄，
+          后面几个音按远近依次变淡（个数可调），底部再列一遍音名。
+
+（下落式 FallView 已经在 v1.1 砍掉：实战里 4×4 网格更好认。）
 """
 
 from __future__ import annotations
+
+import time
 
 from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPen
@@ -26,12 +30,16 @@ class SheetView(QWidget):
         self.sec = 0.0
         self.preview_count = 5
         self.show_labels = True
+        self.bg_scale = 1.0              # 底板浓度（1 = 原样，0 = 全透明）
+        self.flash: dict[str, float] = {}   # 实时跟弹：音高 -> 到期时刻
+        self._last_key = None            # 上一帧的绘制内容指纹（用于省重绘）
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     # ---- 数据接口 ----
 
     def set_timeline(self, tl: Timeline | None):
         self.timeline = tl
+        self._last_key = None
         self.update()
 
     def set_time(self, sec: float):
@@ -42,9 +50,44 @@ class SheetView(QWidget):
 
     def _panel(self, p: QPainter):
         w, h = self.width(), self.height()
-        p.setPen(QPen(T.BG_EDGE, 2))
-        p.setBrush(QBrush(T.BG))
+        p.setPen(QPen(self._dim(T.BG_EDGE), 2))
+        p.setBrush(QBrush(self._dim(T.BG)))
         p.drawRoundedRect(QRectF(1, 1, w - 2, h - 2), 16, 16)
+
+    def set_bg_scale(self, scale: float):
+        """底板浓度 —— 只影响背景和格子，音名文字一点不受影响。"""
+        self.bg_scale = max(0.0, min(1.0, float(scale)))
+        self._last_key = None
+        self.update()
+
+    def _dim(self, c: QColor) -> QColor:
+        """按底板浓度把颜色调淡（bg_scale = 1 时原样返回）。"""
+        if self.bg_scale >= 0.999:
+            return c
+        out = QColor(c)
+        out.setAlpha(int(round(c.alpha() * self.bg_scale)))
+        return out
+
+    # ---- 实时跟弹的高亮 ----
+
+    def set_flash(self, pitch: str, seconds: float = 0.7):
+        """让某个键亮一下 —— 游戏里敲了哪个就亮哪个。"""
+        if not pitch:
+            return
+        self.flash[pitch] = time.monotonic() + max(0.1, float(seconds))
+        self._last_key = None
+        self.update()
+
+    def has_flash(self) -> bool:
+        now = time.monotonic()
+        for p in list(self.flash):
+            if self.flash[p] <= now:
+                del self.flash[p]
+        return bool(self.flash)
+
+    def clear_flash(self):
+        self.flash.clear()
+        self.update()
 
     def _hint(self, p: QPainter, text: str):
         p.setPen(QPen(T.TEXT_DIM))
@@ -76,6 +119,19 @@ class GridView(SheetView):
     HEADER_H = 50
     FOOTER_H = 40
     PAD = 12
+
+    def set_time(self, sec: float):
+        """这一帧画的东西没变就不重绘。
+
+        时钟跑到 ~120fps，但网格只在「当前音换人了」那一刻才真的变，
+        所以这里做个指纹比对：绝大多数 tick 是零开销的。
+        """
+        self.sec = sec
+        key = tuple((tuple(cells), rest, name)
+                    for cells, rest, name in self._current_group())
+        if key != self._last_key:
+            self._last_key = key
+            self.update()
 
     def paintEvent(self, _ev):
         p = QPainter(self)
@@ -142,8 +198,8 @@ class GridView(SheetView):
                     inset = 0.0
 
                 r = rect.adjusted(inset, inset, -inset, -inset)
-                p.setPen(QPen(edge, 3 if rank == 0 else 1.5))
-                p.setBrush(QBrush(fill))
+                p.setPen(QPen(self._dim(edge), 3 if rank == 0 else 1.5))
+                p.setBrush(QBrush(self._dim(fill)))
                 p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
 
                 if self.show_labels:
@@ -151,6 +207,26 @@ class GridView(SheetView):
                     p.setFont(_fit_font(cell * 0.34, bold=(rank == 0)))
                     p.drawText(r, Qt.AlignmentFlag.AlignCenter,
                                layout.cell_to_pitch(row, col))
+
+        # ---- 实时跟弹：刚听到的键，盖一层亮青 ----
+        now = time.monotonic()
+        for fp in list(self.flash):
+            left = self.flash[fp] - now
+            if left <= 0:
+                del self.flash[fp]
+                continue
+            pcell = layout.pitch_to_cell(fp)
+            if pcell is None:
+                continue
+            prow, pcol = pcell
+            k = min(1.0, left / 0.7)
+            fx = ox + pcol * (cell + T.GAP)
+            fy = oy + (3 - prow) * (cell + T.GAP)
+            fr = QRectF(fx, fy, cell, cell).adjusted(
+                -cell * 0.03, -cell * 0.03, cell * 0.03, cell * 0.03)
+            p.setPen(QPen(QColor(130, 255, 225, int(200 * k + 45)), 4.0))
+            p.setBrush(QBrush(QColor(90, 240, 200, int(140 * k + 25))))
+            p.drawRoundedRect(fr, T.RADIUS, T.RADIUS)
 
         # ---- 底部：后面几个音的名字 ----
         p.setFont(_fit_font(max(9.0, h * 0.028)))
@@ -173,89 +249,6 @@ class GridView(SheetView):
                               w - 2 * self.PAD, 20),
                        Qt.AlignmentFlag.AlignCenter,
                        '琴上没有这些音，会被跳过：' + ' '.join(bad[:6]))
-
-
-class FallView(SheetView):
-    """下落式 —— 16 条轨道，音符从上往下掉。"""
-
-    HEADER_H = 26
-    JUDGE_H = 54
-    LOOKAHEAD = 3.2          # 屏幕上显示未来多少秒
-
-    def paintEvent(self, _ev):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self._panel(p)
-
-        if not self.timeline or not self.timeline.items:
-            self._hint(p, '还没有谱子')
-            return
-
-        w, h = self.width(), self.height()
-        pad = 10
-        lane_w = (w - 2 * pad) / 16.0
-        top = self.HEADER_H
-        judge_y = h - self.JUDGE_H
-        span = judge_y - top
-        if span <= 0 or lane_w <= 0:
-            return
-
-        px_per_sec = span / self.LOOKAHEAD
-
-        # ---- 轨道底纹 + 列头音名 ----
-        font = _fit_font(min(11.0, lane_w * 0.52))
-        p.setFont(font)
-        for i in range(16):
-            row, col = divmod(i, 4)
-            x = pad + i * lane_w
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(QColor(255, 255, 255, 8 if i % 2 else 18)))
-            p.drawRect(QRectF(x + 1, top, lane_w - 2, span))
-            p.setPen(QPen(T.TEXT_DIM))
-            p.drawText(QRectF(x, 2, lane_w, self.HEADER_H - 4),
-                       Qt.AlignmentFlag.AlignCenter,
-                       layout.cell_to_pitch(row, col))
-
-        # ---- 判定线 ----
-        p.setPen(QPen(T.ACTIVE, 2.5))
-        p.drawLine(pad, judge_y, w - pad, judge_y)
-
-        # ---- 音符 ----
-        for item in self.timeline.items:
-            y_start = judge_y - (item.start_sec - self.sec) * px_per_sec
-            y_end = judge_y - (item.end_sec - self.sec) * px_per_sec
-            if y_end < top or y_start > judge_y + 8:
-                continue
-            active = item.start_sec <= self.sec < item.end_sec
-            if item.chord.is_rest:
-                continue
-            for pitch in item.chord.pitches:
-                cell = layout.pitch_to_cell(pitch)
-                if cell is None:
-                    continue
-                i = layout.pad_number(cell[0], cell[1]) - 1
-                x = pad + i * lane_w
-                y1 = max(y_start, top - 40)
-                y2 = min(y_end, judge_y + 6)
-                bh = max(6.0, y2 - y1)
-                base = T.ZONE_COLORS[T.zone_of(cell[0])]
-                if active:
-                    p.setPen(QPen(QColor(255, 255, 255), 2.5))
-                    p.setBrush(QBrush(T.ACTIVE))
-                else:
-                    p.setPen(QPen(base.lighter(115), 1.2))
-                    p.setBrush(QBrush(base))
-                p.drawRoundedRect(
-                    QRectF(x + 3, y1, lane_w - 6, bh), 5, 5)
-
-        # ---- 正在响的音名（判定线左侧） ----
-        cur = self.timeline.item_at(self.sec)
-        if cur and not cur.chord.is_rest:
-            p.setPen(QPen(T.ACTIVE))
-            p.setFont(_fit_font(max(11.0, h * 0.045), bold=True))
-            p.drawText(QRectF(0, judge_y + 4, w, self.JUDGE_H - 6),
-                       Qt.AlignmentFlag.AlignCenter,
-                       '+'.join(cur.chord.pitches))
 
 
 # ---------------- 小工具 ----------------

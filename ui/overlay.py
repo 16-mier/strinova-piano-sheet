@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from core.timeline import Timeline
 
-from .views import FallView, GridView
+from .views import GridView
 
 
 class _MSG(ctypes.Structure):
@@ -39,12 +39,23 @@ WS_EX_LAYERED = 0x00080000
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
 
+# SetWindowPos 的选项位
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
+
 _user32 = ctypes.windll.user32
 _user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
 _user32.GetWindowLongW.restype = ctypes.c_long
 _user32.SetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int,
                                    ctypes.c_long]
 _user32.SetWindowLongW.restype = ctypes.c_long
+_user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                 ctypes.c_int, ctypes.c_int,
+                                 ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+_user32.SetWindowPos.restype = ctypes.c_bool
 
 
 class Player(QObject):
@@ -62,7 +73,7 @@ class Player(QObject):
         self._clock = QElapsedTimer()
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._timer.setInterval(16)                      # ~60fps
+        self._timer.setInterval(8)                       # ~120fps，快速连音也要跟得上
         self._timer.timeout.connect(self._on_tick)
 
     # ---- 控制 ----
@@ -136,7 +147,6 @@ class OverlayWindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(None)
         self._click_through = True
-        self._mode = 'grid'
 
         self.setWindowTitle('卡丘琴谱器')
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -150,13 +160,10 @@ class OverlayWindow(QWidget):
         )
 
         self.grid_view = GridView(self)
-        self.fall_view = FallView(self)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addWidget(self.grid_view)
-        lay.addWidget(self.fall_view)
-        self.fall_view.hide()
 
         # 倒计时大字（压在谱面上，倒数完自动开播）
         self.lbl_count = QLabel('', self)
@@ -188,32 +195,42 @@ class OverlayWindow(QWidget):
         self._count_timer.timeout.connect(self._on_count_tick)
 
         self._drag_offset = None
+        self._ghost = False          # 临时隐身（卡丘不在前台时）
+        self._user_opacity = 1.0     # 用户在控制面板里设的不透明度
+        # 实时跟弹高亮的刷新（有高亮才跑，平时零开销）
+        self._flash_tick = QTimer(self)
+        self._flash_tick.setInterval(33)
+        self._flash_tick.timeout.connect(self._on_flash_tick)
         self.resize(470, 580)
 
     # ---- 视图 ----
 
     @property
     def view(self):
-        return self.grid_view if self._mode == 'grid' else self.fall_view
-
-    def set_mode(self, mode: str):
-        if mode not in ('grid', 'fall'):
-            return
-        self._mode = mode
-        self.grid_view.setVisible(mode == 'grid')
-        self.fall_view.setVisible(mode == 'fall')
-        self.view.update()
-
-    def toggle_mode(self) -> str:
-        self.set_mode('fall' if self._mode == 'grid' else 'grid')
-        return self._mode
+        return self.grid_view
 
     def set_timeline(self, tl: Timeline | None):
         self.grid_view.set_timeline(tl)
-        self.fall_view.set_timeline(tl)
 
     def set_time(self, sec: float):
         self.view.set_time(sec)
+
+    # ---- 实时跟弹的高亮 ----
+
+    def flash_note(self, pitch: str, seconds: float = 0.7):
+        """游戏里敲了哪个键，就在浮窗上亮哪个。"""
+        self.grid_view.set_flash(pitch, seconds)
+        if not self._flash_tick.isActive():
+            self._flash_tick.start()
+
+    def _on_flash_tick(self):
+        alive = self.grid_view.has_flash()
+        self.grid_view.update()
+        if not alive:
+            self._flash_tick.stop()
+
+    def clear_flash(self):
+        self.grid_view.clear_flash()
 
     # ---- 鼠标穿透 ----
 
@@ -228,17 +245,64 @@ class OverlayWindow(QWidget):
         self._apply_exstyle()
 
     def _apply_exstyle(self):
+        """切换「鼠标穿透」—— 两个坑都在这里填掉了。
+
+        坑 1：光 SetWindowLong 不够。改完扩展样式必须再来一发
+              SetWindowPos(SWP_FRAMECHANGED)，系统才会重算命中测试，
+              否则鼠标照样穿过去 —— 表现就是「勾了允许拖动还是拖不动」。
+        坑 2：关掉穿透时**不能**顺手去掉 WS_EX_NOACTIVATE。
+              保留它，拖窗口的时候游戏才不会失焦，
+              UE4 也就不会解除鼠标锁定（就是那个「鼠标飘出窗口」的老毛病）。
+              窗口收得到鼠标消息，只是不会被激活，拖动照样好用。
+        另外带 SWP_NOZORDER —— 绝不动 Z 序，免得又踩到 UE4 的全屏重算。
+        """
         try:
             hwnd = int(self.winId())
-            ex = _user32.GetWindowLongW(ctypes.c_void_p(hwnd), GWL_EXSTYLE)
+            ex = _user32.GetWindowLongW(ctypes.c_void_p(hwnd),
+                                        GWL_EXSTYLE) & 0xFFFFFFFF
+            keep = WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
             if self._click_through:
-                ex |= (WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE
-                       | WS_EX_TOOLWINDOW)
+                ex |= (WS_EX_TRANSPARENT | keep)
             else:
-                ex &= ~(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)
+                ex = (ex | keep) & ~(WS_EX_TRANSPARENT & 0xFFFFFFFF)
             _user32.SetWindowLongW(ctypes.c_void_p(hwnd), GWL_EXSTYLE, ex)
+            _user32.SetWindowPos(ctypes.c_void_p(hwnd), None, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+                                 | SWP_NOACTIVATE | SWP_FRAMECHANGED)
         except Exception:
             pass
+
+    def ex_style(self) -> int:
+        """当前扩展样式（诊断用）。"""
+        try:
+            return _user32.GetWindowLongW(
+                ctypes.c_void_p(int(self.winId())), GWL_EXSTYLE) & 0xFFFFFFFF
+        except Exception:
+            return 0
+
+    # ---- 临时隐身 ----
+
+    def set_ghost(self, on: bool):
+        """临时隐身：窗口还「在」，全局热键照收得到，但完全透明看不见。
+
+        为什么不直接 hide()：隐藏掉的窗口收不到 WM_HOTKEY，
+        一隐身就再也唤不回来了（只能回控制面板点）。
+        """
+        on = bool(on)
+        if on == self._ghost:
+            return
+        self._ghost = on
+        self.setWindowOpacity(0.0 if on else self._user_opacity)
+
+    @property
+    def ghost(self) -> bool:
+        return self._ghost
+
+    def set_user_opacity(self, v: float):
+        """用户设定的不透明度（隐身期间先记着，露脸时再套用）。"""
+        self._user_opacity = max(0.05, min(1.0, float(v)))
+        if not self._ghost:
+            self.setWindowOpacity(self._user_opacity)
 
     # ---- 窗口事件 ----
 
@@ -338,11 +402,21 @@ class OverlayWindow(QWidget):
     # ---- 全局热键消息 ----
 
     def nativeEvent(self, event_type, message):
-        if self.hotkeys is not None:
+        """接 WM_HOTKEY。
+
+        ★ 两个坑，都踩过 ★
+        1. `self.hotkeys` 必须用 getattr 取 —— 这个方法可能在 QWidget 构造期间
+           就被 Qt 调到，那时属性还没赋值。
+        2. **结尾必须显式 `return False, 0`，不能 `return super().nativeEvent(...)`**。
+           PyQt6 里基类实现可能返回 None，而 Qt 侧期望解包成 (bool, int)，
+           结果就是进程直接 access violation（崩得毫无提示）。
+        """
+        hk = getattr(self, 'hotkeys', None)
+        if hk is not None:
             try:
                 msg = _MSG.from_address(int(message))
-                if self.hotkeys.handle_native(msg.message, msg.wParam):
+                if hk.handle_native(msg.message, msg.wParam):
                     return True, 0
             except Exception:
                 pass
-        return super().nativeEvent(event_type, message)
+        return False, 0

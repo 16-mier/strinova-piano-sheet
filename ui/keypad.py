@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
 """打击垫 —— 点了就出声，可以边弹边写谱。
 
-跟游戏里那台琴一样的 4×4 排列。
-支持鼠标点击，也支持电脑键盘（键盘上排 = 游戏里最上排）。
+跟游戏里那台琴一样的 4×4 排列，**只认鼠标**。
 
-键盘映射（按视觉位置对应）：
-    1 2 3 4   ->  5'  6'  7'  1''
-    q w e r   ->  1'  2'  3'  4'
-    a s d f   ->  5   6   7   8
-    z x c v   ->  1   2   3   4
+★ 故意不绑电脑键盘 ★
+   以前绑过 1234/qwer/asdf/zxcv，结果在别处打字、或者在游戏里按技能键，
+   都会莫名其妙触发打击垫、把音符写进谱子里。现在彻底解绑，
+   焦点策略也设成 NoFocus —— 点它不会把文本框的焦点抢走。
 """
 
 from __future__ import annotations
@@ -24,9 +22,6 @@ from core import layout, synth
 from core.paths import app_dir
 
 from . import theme as T
-
-# 键盘行，索引 0 = 键盘最上排，对应游戏里最上面那一行
-KEY_ROWS = ['1234', 'qwer', 'asdf', 'zxcv']
 
 # 每个音准备几个播放实例轮换，这样同一个音快速连按不会互相打断
 _POOL = 3
@@ -95,7 +90,7 @@ class KeyPad(QWidget):
         self._flash: dict[tuple[int, int], int] = {}     # 格子 -> 剩余闪烁帧
         self._pressed: set[tuple[int, int]] = set()
         self.setMinimumSize(260, 260)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # 只认鼠标，不抢焦点
         self.setMouseTracking(False)
 
     # ---- 音源 ----
@@ -159,21 +154,6 @@ class KeyPad(QWidget):
         self._pressed.clear()
         self.update()
         super().mouseReleaseEvent(event)
-
-    # ---- 键盘 ----
-
-    def keyPressEvent(self, event):
-        if event.isAutoRepeat():
-            return
-        ch = event.text().lower()
-        for r, keys in enumerate(KEY_ROWS):
-            if ch in keys:
-                col = keys.index(ch)
-                row = 3 - r          # 键盘上排 -> 游戏上排
-                self.trigger(row, col)
-                event.accept()
-                return
-        super().keyPressEvent(event)
 
     # ---- 闪烁 ----
 

@@ -460,13 +460,134 @@ def test_rest_index_after_beat():
     assert m.rest_index_after_beat(99.0) == 3
 
 
+# ---------------- 和弦（同一时刻一起响） ----------------
+
+def test_split_and_make_raw():
+    assert edit_model.split_raw("^^1'&3'--") == ('^^', "1'&3'", '--')
+    assert edit_model.split_raw('1^') == ('', '1', '^')
+    assert edit_model.split_raw('7') == ('', '7', '')
+    assert edit_model.split_raw('1~-') == ('', '1', '~-')
+    assert edit_model.make_raw('^^1--', ['1', '3']) == '^^1&3--'
+    # ^ 写在后面对时长是等价的（parser 只看个数），所以原地保留
+    assert edit_model.make_raw('1^', ['5', '6']) == '5&6^'
+    assert edit_model.make_raw('^^1--', ['3', '1']) == '^^3&1--'
+
+
+def test_add_pitch_sorts_by_pad():
+    m = edit_model.EditModel(parser.parse('1'))
+    n = m.notes[0]
+    assert m.add_pitch(n, "1'")            # PAD9
+    assert m.add_pitch(n, '5')             # PAD5
+    assert n.pitches == ['1', '5', "1'"]   # 永远按琴上的顺序写
+    assert n.raw == "1&5&1'"
+    assert not m.add_pitch(n, '5')         # 重复的不加
+
+
+def test_remove_pitch_keeps_block_until_empty():
+    m = edit_model.EditModel(parser.parse('1&3'))
+    n = m.notes[0]
+    assert m.remove_pitch(n, '3')
+    assert n.pitches == ['1']
+    assert n.raw == '1'
+    assert len(m.notes) == 1
+    assert m.remove_pitch(n, '1')          # 拿光了 -> 整块删掉
+    assert len(m.notes) == 0
+
+
+def test_merge_into_prev_makes_chord():
+    m = edit_model.EditModel(parser.parse('1 3'))
+    got = m.merge_into_prev(1)
+    assert got is m.notes[0]
+    assert len(m.notes) == 1
+    assert m.notes[0].pitches == ['1', '3']
+    assert m.notes[0].raw == '1&3'
+    assert math.isclose(m.total_beats, 1.0)   # 两个音挤在同一拍，总时长少一拍
+    # 回写成文本之后，解析回来还得是同一个和弦
+    again = parser.parse(m.rebuild())
+    assert again.chords[0].pitches == ['1', '3']
+
+
+def test_merge_keeps_longer_duration():
+    """合并时时值取长的那个 —— 不然音乐会莫名其妙变快。"""
+    m = edit_model.EditModel(parser.parse('1 3-'))
+    m.merge_into_prev(1)
+    assert m.notes[0].raw == '1&3-'
+    assert math.isclose(m.notes[0].dur, 2.0)
+
+
+def test_move_to_beat_snaps_into_chord():
+    m = edit_model.EditModel(parser.parse('1 3'))
+    second = m.notes[1]
+    got = m.move_to_beat(second, 0.0)
+    assert got is m.notes[0]              # 变成和弦之后，选中的是前面那个块
+    assert len(m.notes) == 1
+    assert m.notes[0].pitches == ['1', '3']
+
+
+def test_move_to_beat_normal_move():
+    m = edit_model.EditModel(parser.parse('1 3'))
+    second = m.notes[1]
+    got = m.move_to_beat(second, 3.0)
+    assert got is second
+    assert math.isclose(second.start, 3.0)
+    assert math.isclose(m.total_beats, 4.0)
+
+
+def test_move_to_beat_clamps_when_overshot():
+    """拖过头压到前一个音身上（但没对准起点）= 紧贴着，不合并。"""
+    m = edit_model.EditModel(parser.parse('1 3'))
+    second = m.notes[1]
+    got = m.move_to_beat(second, 0.5)
+    assert got is second
+    assert len(m.notes) == 2
+    assert math.isclose(second.start, 1.0)      # 紧贴在前一个音后面
+
+
+def test_split_pitch_out():
+    m = edit_model.EditModel(parser.parse('1&3'))
+    n = m.notes[0]
+    out = m.split_pitch_out(n, '3')
+    assert out is not None
+    assert n.pitches == ['1']
+    assert out.pitches == ['3']
+    assert len(m.notes) == 2
+    assert math.isclose(out.start, 1.0)         # 拆出来的排在和弦后面
+
+
+def test_set_dur_of_reencodes():
+    m = edit_model.EditModel(parser.parse('1'))
+    n = m.notes[0]
+    assert m.set_dur_of(n, 0.5)
+    assert n.raw == '^1'
+    assert math.isclose(n.dur, 0.5)
+    assert math.isclose(m.total_beats, 0.5)
+
+
+def test_note_starting_at():
+    m = edit_model.EditModel(parser.parse('1 3'))
+    assert m.note_starting_at(0.0) is m.notes[0]
+    assert m.note_starting_at(1.05) is m.notes[1]
+    assert m.note_starting_at(5.0) is None
+    assert m.note_at(0.5) is m.notes[0]
+
+
+def test_chord_survives_rebuild_roundtrip():
+    m = edit_model.EditModel(parser.parse('1&3&5 2'))
+    assert m.notes[0].pitches == ['1', '3', '5']
+    sheet2 = parser.parse(m.rebuild())
+    assert sheet2.chords[0].pitches == ['1', '3', '5']
+    assert sheet2.chords[1].pitches == ['2']
+
+
 # ---------------- 听音记谱 ----------------
 
 def test_pitch_freq_table():
-    assert math.isclose(transcribe.pitch_freq('1'), 261.63, abs_tol=0.1)
-    assert math.isclose(transcribe.pitch_freq('8'), 523.25, abs_tol=0.1)
-    assert math.isclose(transcribe.pitch_freq("1'"), 523.25, abs_tol=0.1)
-    assert math.isclose(transcribe.pitch_freq("1''"), 1046.5, abs_tol=0.3)
+    # ★ 这台琴的 `1` 是 C3（130Hz），不是通常简谱的 C4 ——
+    #   从 16 个游戏原始采样里量出来的，见 tools/check_notes.py。
+    assert math.isclose(transcribe.pitch_freq('1'), 130.81, abs_tol=0.1)
+    assert math.isclose(transcribe.pitch_freq('8'), 261.63, abs_tol=0.1)
+    assert math.isclose(transcribe.pitch_freq("1'"), 261.63, abs_tol=0.1)
+    assert math.isclose(transcribe.pitch_freq("1''"), 523.25, abs_tol=0.3)
     # 8 和 1' 在乐理上是同一个音高（游戏里是两个键）
     assert math.isclose(transcribe.pitch_freq('8'),
                         transcribe.pitch_freq("1'"), abs_tol=1e-6)
@@ -477,13 +598,13 @@ def test_key_freqs_cover_all_16():
 
 
 def test_nearest_pitch_matches():
-    p, cents = transcribe.nearest_pitch(261.0)
+    p, cents = transcribe.nearest_pitch(130.0)      # 这台琴的 `1` 是 C3
     assert p == '1'
     assert abs(cents) < 50
-    p2, _ = transcribe.nearest_pitch(1040.0)
+    p2, _ = transcribe.nearest_pitch(520.0)
     assert p2 in ("1''", '7\'')
     # 完全跑调的音会给出很大的偏差
-    _p3, big = transcribe.nearest_pitch(100.0)
+    _p3, big = transcribe.nearest_pitch(50.0)
     assert abs(big) > 200
 
 
@@ -515,7 +636,91 @@ def test_transcribe_synthetic_sine():
         audio[i * int(spb * rate):][:n] += (
             np.sin(2 * np.pi * f * t) * np.exp(-4.0 * t) * 0.8)
 
-    _tok, hits = transcribe.transcribe(audio, rate, bpm=120)
+    _tok, hits = transcribe.transcribe(audio, rate, bpm=120, min_margin=0.0)
     got = [h.pitch for h in hits]
     assert len(got) >= 2, '只认出 %d 个: %s' % (len(got), got)
     assert got == seq[:len(got)], '认出 %s，期望是 %s 的前缀' % (got, seq[:len(got)])
+
+
+def test_note_samples_pitch_table():
+    """把 16 个采样的实测基频打出来 —— 这是**待你在游戏里核对的清单**。
+
+    ⚠ 这里故意**不校验键名**，因为实测发现：
+        3.wav 和 3_up.wav 的基频都是 330Hz
+        6.wav 和 6_up.wav 的基频都是 440Hz
+        8.wav / 1_up.wav 的基频都是 261Hz
+      ……也就是说这 16 个采样里**只有 8 种音高**，好几对是重复的。
+      所以「文件名 ↔ 琴上哪个键」这层对应关系还没被证实，
+      必须**在游戏里实际弹一遍**才能定案（见 DEVELOPMENT.md）。
+
+    用 `python -m pytest tests -k pitch_table -s` 看完整表格。
+    """
+    import os
+
+    import pytest
+
+    from core import synth
+    from core.paths import app_dir
+
+    notes = synth.ensure_notes(os.path.join(app_dir(), 'assets', 'notes'))
+    if len(notes) < 16:
+        pytest.skip('没有游戏原始采样（assets/notes），跳过')
+
+    print()
+    print('  %-9s %-6s %8s' % ('采样文件', '实测', '基频'))
+    print('  ' + '-' * 30)
+    seen = {}
+    for pitch, path in sorted(notes.items()):
+        seg, _rate = _as_seg(path)
+        got = transcribe.match_key(seg, 48000)
+        assert got[0], '%s 认不出音高' % pitch
+        f = round(transcribe.pitch_freq(got[0]))
+        seen.setdefault(f, []).append(pitch)
+        print('  %-9s %-6s %8d Hz' % (pitch, got[0], f))
+    print('  ' + '-' * 30)
+    print('  不同音高只有 %d 种：%s'
+          % (len(seen), '  '.join('%dHz×%d' % (f, len(v))
+                                  for f, v in sorted(seen.items()))))
+    # 底线：至少得认出 8 种不同音高，不然说明识别整个坏掉了
+    assert len(seen) >= 8, '只认出 %d 种音高，识别有问题' % len(seen)
+
+
+def _as_seg(path, n: int = 12000):
+    """读一个采样文件 -> (前 n 个样本, 采样率)。
+
+    窗口取 0.25 秒：短窗口的频率分辨率太差（0.1 秒只有 10Hz），
+    连 257 和 261 这种相邻峰都分不开。
+    """
+    import numpy as np
+
+    from core import audio_io
+    a, sr = audio_io.load_audio(path, target_sr=48000)
+    if len(a) < n:
+        a = np.pad(a, (0, n - len(a)))
+    return a[:n], 48000
+
+
+def test_chord_is_collapsed_to_strongest_note():
+    """和弦（同时按多个键）目前只会认成最强的那一个 —— 已知限制，锁住行为。"""
+    import numpy as np
+
+    from core import synth
+    import os
+    from core.paths import app_dir
+
+    notes = synth.ensure_notes(os.path.join(app_dir(), 'assets', 'notes'))
+    if '1' not in notes or '5' not in notes:
+        import pytest
+        pytest.skip('没有游戏原始采样，跳过')
+
+    a1, _ = _as_seg(notes['1'])
+    a5, _ = _as_seg(notes['5'])
+    mixed = a1 * 0.5 + a5 * 1.0          # 5 更响
+    pitch, _f, _m = transcribe.match_key(mixed, 48000)
+    # 不锁"认成哪个"：1 和 5 是纯五度（频率 2:3），谐波大面积重合，
+    # 谁强谁弱本来就含糊。只锁"不会认成一个跟它俩都不相干的音"。
+    assert pitch in ('1', '5', "1'", '8'), '认成了不相干的 %s' % pitch
+
+    n1, _f1, m1 = transcribe.match_key(a1, 48000)
+    n5, _f5, m5 = transcribe.match_key(a5, 48000)
+    assert (n1, n5) == ('1', '5')         # 单独听的时候都是准的
