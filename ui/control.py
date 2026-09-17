@@ -869,7 +869,7 @@ class ControlWindow(QMainWindow):
         self._live_level = 0.0
         self._live_device = self.cmb_live_dev.currentText() or dev
         self._stream = recorder.LoopbackStream(self._on_audio_block,
-                                               blocksize=512,
+                                               blocksize=256,
                                                samplerate=48000)
         ok = self._stream.start(str(dev), channels=2)
         if not ok:

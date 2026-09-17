@@ -91,7 +91,7 @@ def main() -> int:
     if '--short' in sys.argv:
         print('短窗口下的识别（模拟弹得快时只能取 84ms）—— 看低频键分不分得开')
         print('-' * 78)
-        for wn_ms in (84, 120, 200):
+        for wn_ms in (30, 45, 60, 84, 120):
             wn = int(RATE * wn_ms / 1000)
             bad = []
             detail = []

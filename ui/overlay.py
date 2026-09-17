@@ -199,7 +199,7 @@ class OverlayWindow(QWidget):
         self._user_opacity = 1.0     # 用户在控制面板里设的不透明度
         # 实时跟弹高亮的刷新（有高亮才跑，平时零开销）
         self._flash_tick = QTimer(self)
-        self._flash_tick.setInterval(16)
+        self._flash_tick.setInterval(8)
         self._flash_tick.timeout.connect(self._on_flash_tick)
         self.resize(470, 580)
 

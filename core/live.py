@@ -67,9 +67,14 @@ class LiveDetector:
         # 最近几次的起音间隔 —— 拿来动态定"局部归一化看多远"（见 _local_frames）
         self._recent_gaps: deque[float] = deque(maxlen=6)
         self.f0_len = max(256, int(f0_win_s * self.rate))
-        # 分析窗的下限（再短 FFT 分辨率就没法看了）和"等一等再处理"的时长
-        self.min_win = max(2048, int(0.045 * self.rate))
-        self.late_s = 0.03
+        # ★ 分析窗的下限 = 60ms，这是实测出来的硬底线 ★
+        #   30ms 时低频键会认错（`1` 和 `2`、`4` 分不开），45ms 还差一个，
+        #   60ms 起 16 个键全部正确。所以窗口不能再短了 ——
+        #   想再快只能从别处省（见 late_s 和 blocksize）。
+        self.min_win = max(2880, int(0.060 * self.rate))
+        # 窗口固定 60ms 够用（十六分音符 90ms 一个，不会跨音），
+        # 所以**不用再等下一个起音出现**了 —— 这一等就是白等 30ms。
+        self.late_s = 0.0
 
         local_frames = max(3, int(local_win_s * self.rate / self.hop))
         self._frames: deque[tuple[int, float]] = deque(maxlen=local_frames + 2)
@@ -221,8 +226,11 @@ class LiveDetector:
             ready = list(self._waiting)
             self._waiting = []
         else:
+            # 两条都要满足：① 过了冷却时间 ② **样本攒够了**
+            #（② 特别重要 —— 不够就得补零，补零会把谱搞坏，音高直接测歪）
             ready = [at for at in self._waiting
-                     if now_t - at / float(self.rate) >= self.late_s]
+                     if (now_t - at / float(self.rate) >= self.late_s
+                         and at + self.min_win <= self._total)]
             if ready:
                 self._waiting = [at for at in self._waiting
                                  if at not in ready]
