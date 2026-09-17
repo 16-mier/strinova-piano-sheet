@@ -9,15 +9,18 @@ import os
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout,
+    QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from core import layout, parser, timeline
+from core import layout, parser, recorder, timeline, transcribe
 from core.paths import APP_NAME, all_sheets, config_path, sheets_dir
 
 from .editor import EditorDialog
+from .hotkeys import (HK_LISTEN, HK_PLAYPAUSE, HK_RESTART, HOTKEY_LABELS,
+                      HotkeyManager, choice_index_by_name)
+from .listen_dialog import ListenDialog
 from .overlay import OverlayWindow, Player
 
 
@@ -37,6 +40,20 @@ class ControlWindow(QMainWindow):
 
         self.setWindowTitle('%s — 控制台' % APP_NAME)
         self.resize(640, 680)
+
+        # 听音记谱相关
+        self._cfg: dict = {}
+        self._rec: recorder.LoopbackRecorder | None = None
+        self._listen: ListenDialog | None = None
+        self._listen_result = ''
+        self._tick_listen = QTimer(self)
+        self._tick_listen.setInterval(300)
+        self._tick_listen.timeout.connect(self._update_listen_toast)
+
+        # 全局热键挂在谱面窗上 —— 它常驻、置顶、且不会抢焦点
+        self.hotkeys = HotkeyManager(overlay, self)
+        overlay.hotkeys = self.hotkeys
+        self.hotkeys.fired.connect(self._on_hotkey)
 
         self._build()
         self._wire()
@@ -64,13 +81,16 @@ class ControlWindow(QMainWindow):
         btn_open = QPushButton('打开…')
         btn_edit = QPushButton('编辑谱面')
         btn_reload = QPushButton('重新载入')
-        for b in (btn_open, btn_edit, btn_reload):
+        btn_listen = QPushButton('🎧 听音记谱')
+        btn_listen.setToolTip('把游戏里弹的琴录下来，自动变成谱子')
+        for b in (btn_open, btn_edit, btn_reload, btn_listen):
             b.setFixedHeight(30)
         row.addWidget(QLabel('曲谱仓库'))
         row.addWidget(self.cmb_sheet, 1)
         row.addWidget(btn_open)
         row.addWidget(btn_edit)
         row.addWidget(btn_reload)
+        row.addWidget(btn_listen)
         f.addLayout(row)
 
         self.lbl_sheet = QLabel('还没有载入谱面')
@@ -78,7 +98,9 @@ class ControlWindow(QMainWindow):
         self.lbl_sheet.setStyleSheet('color:#9aa3b8;')
         f.addWidget(self.lbl_sheet)
 
-        self.btn_open, self.btn_edit, self.btn_reload = btn_open, btn_edit, btn_reload
+        self.btn_open, self.btn_edit, self.btn_reload = (btn_open, btn_edit,
+                                                        btn_reload)
+        self.btn_listen = btn_listen
         box.addWidget(g_sheet)
 
         # ---------- 播放 ----------
@@ -176,6 +198,37 @@ class ControlWindow(QMainWindow):
         fg.addWidget(self.lbl_tip)
         box.addWidget(g_pos)
 
+        # ---------- 游戏内快捷键 ----------
+        g_hk = QGroupBox('游戏内快捷键（按下不会抢游戏窗口）')
+        fh = QFormLayout(g_hk)
+
+        self.cmb_hk_play = QComboBox()
+        self.cmb_hk_play.addItems(HOTKEY_LABELS)
+        self.cmb_hk_restart = QComboBox()
+        self.cmb_hk_restart.addItems(HOTKEY_LABELS)
+        self.cmb_hk_listen = QComboBox()
+        self.cmb_hk_listen.addItems(HOTKEY_LABELS)
+        fh.addRow('开始 / 暂停', self.cmb_hk_play)
+        fh.addRow('从头开始', self.cmb_hk_restart)
+        fh.addRow('听音记谱 开/停', self.cmb_hk_listen)
+
+        self.sp_count = QSpinBox()
+        self.sp_count.setRange(0, 15)
+        self.sp_count.setValue(3)
+        self.sp_count.setSuffix(' 秒')
+        self.sp_count.setToolTip(
+            '按开始后先倒数这么多秒，让你把注意力挪回游戏')
+        fh.addRow('按下后倒计时', self.sp_count)
+
+        self.lbl_hk = QLabel(
+            '这些键走的是系统级注册：按下时游戏不会失焦、鼠标锁定也不会被解除。'
+            '代价是这个键游戏就收不到了 —— 所以别绑 WASD / 空格 / V / U 这些'
+            '游戏要用的键，用 F 系列或小键盘最稳。')
+        self.lbl_hk.setWordWrap(True)
+        self.lbl_hk.setStyleSheet('color:#9aa3b8;')
+        fh.addRow('', self.lbl_hk)
+        box.addWidget(g_hk)
+
         box.addStretch(1)
 
         self.btn_corner = btn_corner
@@ -189,6 +242,7 @@ class ControlWindow(QMainWindow):
         self.btn_open.clicked.connect(self._open_dialog)
         self.btn_edit.clicked.connect(self._edit_sheet)
         self.btn_reload.clicked.connect(self._reload)
+        self.btn_listen.clicked.connect(self._open_listen)
         self.cmb_sheet.currentIndexChanged.connect(self._pick_from_combo)
 
         self.btn_play.clicked.connect(self.player.toggle)
@@ -213,6 +267,14 @@ class ControlWindow(QMainWindow):
 
         self.player.tick.connect(self._on_tick)
         self.player.state_changed.connect(self._on_state)
+
+        self.cmb_hk_play.currentIndexChanged.connect(
+            lambda _i: self._apply_hotkeys())
+        self.cmb_hk_restart.currentIndexChanged.connect(
+            lambda _i: self._apply_hotkeys())
+        self.cmb_hk_listen.currentIndexChanged.connect(
+            lambda _i: self._apply_hotkeys())
+        self.sp_count.valueChanged.connect(lambda _v: self._save_config())
 
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, self.player.toggle)
         QShortcut(QKeySequence(Qt.Key.Key_Left), self,
@@ -309,6 +371,172 @@ class ControlWindow(QMainWindow):
     def _on_state(self, playing: bool):
         self.btn_play.setText('⏸  暂停' if playing else '▶  播放')
 
+    # ------------------------------------------------------------------
+    # 游戏内快捷键
+    # ------------------------------------------------------------------
+
+    def _apply_hotkeys(self):
+        """按下拉框的选择重新注册全局热键。"""
+        i_play = self.cmb_hk_play.currentIndex()
+        i_rest = self.cmb_hk_restart.currentIndex()
+        i_listen = self.cmb_hk_listen.currentIndex()
+        ok_play = self.hotkeys.bind(HK_PLAYPAUSE, i_play)
+        ok_rest = self.hotkeys.bind(HK_RESTART, i_rest)
+        ok_listen = self.hotkeys.bind(HK_LISTEN, i_listen)
+
+        msgs = []
+        if i_play and not ok_play:
+            msgs.append('「开始/暂停」注册失败：%s'
+                        % self.hotkeys.last_error(HK_PLAYPAUSE))
+        if i_rest and not ok_rest:
+            msgs.append('「从头开始」注册失败：%s'
+                        % self.hotkeys.last_error(HK_RESTART))
+        if i_listen and not ok_listen:
+            msgs.append('「听音记谱」注册失败：%s'
+                        % self.hotkeys.last_error(HK_LISTEN))
+        if msgs:
+            self.statusBar().showMessage('；'.join(msgs))
+        self._save_config()
+
+    def _on_hotkey(self, hk_id: int):
+        if hk_id == HK_PLAYPAUSE:
+            self._hotkey_playpause()
+        elif hk_id == HK_RESTART:
+            self._hotkey_restart()
+        elif hk_id == HK_LISTEN:
+            self._toggle_listen()
+
+    def _hotkey_playpause(self):
+        """开始 / 暂停。开始前先走倒计时，好让你把注意力挪回游戏。"""
+        if self.overlay.counting:              # 倒计时中再按 = 取消
+            self.overlay.cancel_countdown()
+            self.statusBar().showMessage('已取消倒计时')
+            return
+        if self.player.playing:
+            self.player.pause()
+            self.statusBar().showMessage('已暂停')
+            return
+        secs = self.sp_count.value()
+        if secs:
+            self.overlay.start_countdown(secs, self._begin_play)
+            self.statusBar().showMessage('倒计时 %d 秒…' % secs)
+        else:
+            self._begin_play()
+
+    def _hotkey_restart(self):
+        """从头开始：先停下，倒数若干秒，再从第一拍开播。"""
+        self.player.stop()
+        secs = self.sp_count.value()
+        if secs:
+            self.overlay.start_countdown(
+                secs, lambda: self._begin_play(reset=True))
+            self.statusBar().showMessage('从头开始，倒计时 %d 秒…' % secs)
+        else:
+            self._begin_play(reset=True)
+
+    def _begin_play(self, reset: bool = False):
+        if not (self.tl and self.tl.items):
+            self.statusBar().showMessage('还没有载入谱面')
+            return
+        if reset:
+            self.player.seek(0.0)
+        self.player.play()
+        self.statusBar().showMessage('谱面开始')
+
+    # ------------------------------------------------------------------
+    # 听音记谱
+    # ------------------------------------------------------------------
+
+    def _cur_bpm(self) -> int:
+        if self.tl and self.tl.bpm_points:
+            return int(self.tl.bpm_points[0][1])
+        return 120
+
+    def _listen_device_id(self) -> str | None:
+        """该录哪个设备（返回设备 id）。"""
+        if self._listen is not None and self._listen.cmb_dev.count():
+            got = self._listen.cmb_dev.currentData()
+            if got:
+                return str(got)
+        kw = self._cfg.get('listen_device', '')
+        if kw:
+            got = recorder.find_device_id(kw)
+            if got:
+                return got
+        return recorder.guess_game_device()
+
+    def _open_listen(self):
+        """打开听音记谱窗口（手动模式）。"""
+        if self._listen is None:
+            self._listen = ListenDialog(
+                self, bpm=self._cur_bpm(),
+                device_keyword=self._cfg.get('listen_device', ''),
+                insert_cb=self._insert_listen_result)
+        if self._listen_result and not self._listen.text.toPlainText().strip():
+            self._listen.apply_text(self._listen_result)
+        self._listen.sp_bpm.setValue(self._cur_bpm())
+        self._listen.show()
+        self._listen.raise_()
+        self._listen.activateWindow()
+
+    def _toggle_listen(self):
+        """热键：开始/结束录音 —— 全程不弹窗、不抢游戏焦点。"""
+        if self._rec is None:
+            self._rec = recorder.LoopbackRecorder()
+
+        if self._rec.recording:
+            data = self._rec.stop()
+            self._tick_listen.stop()
+            secs = len(data) / max(1, self._rec.samplerate)
+            if secs < 0.5:
+                self.overlay.show_toast('录得太短了（%.1f 秒）' % secs)
+                return
+            self.overlay.show_toast('录到 %.1f 秒，正在识别…' % secs, 60)
+            QApplication.processEvents()
+            self._transcribe_recorded(data)
+            return
+
+        dev = self._listen_device_id()
+        if not dev:
+            self.overlay.show_toast('没找到录音设备\n'
+                                    '先去控制台的「听音记谱」里选一个')
+            return
+        ok = self._rec.start(str(dev), channels=2)
+        if not ok:
+            self._rec.abort()
+            ok = self._rec.start(str(dev), channels=1)
+        if not ok:
+            self.overlay.show_toast('开不了录音：\n%s'
+                                    % (self._rec.last_error or '')[:80])
+            return
+        self._tick_listen.start()
+        self.overlay.show_toast('● 录音中… 再按一次结束', 1.6)
+
+    def _update_listen_toast(self):
+        if self._rec and self._rec.recording:
+            self.overlay.show_toast('● 录音中 %.1f 秒\n再按一次结束'
+                                    % self._rec.seconds, 0.8)
+
+    def _transcribe_recorded(self, data):
+        rate = self._rec.samplerate if self._rec else 48000
+        bpm = self._cur_bpm()
+        _tokens, hits = transcribe.transcribe(data, rate, bpm=bpm)
+        if not hits:
+            self.overlay.show_toast('没识别出音符 😕\n'
+                                    '可能录到的是静音，或者设备选错了', 3.5)
+            return
+        text, _ = transcribe.to_sheet_text(data, rate, bpm=bpm,
+                                           title='听音记谱')
+        self._listen_result = text
+        self.statusBar().showMessage(
+            '听音记谱完成：%d 个音，点「🎧 听音记谱」查看' % len(hits))
+        self.overlay.show_toast('认出来了：%d 个音 ✅\n点控制台的'
+                                '「听音记谱」查看' % len(hits), 3.5)
+
+    def _insert_listen_result(self, text: str):
+        self._listen_result = text
+        self.statusBar().showMessage('识别结果已就绪')
+
     def _toggle_mode(self):
         mode = self.overlay.toggle_mode()
         self.btn_mode.setText('切到下落式' if mode == 'grid' else '切到 4×4 网格')
@@ -370,6 +598,7 @@ class ControlWindow(QMainWindow):
                     cfg = json.load(f)
         except Exception:
             cfg = {}
+        self._cfg = cfg
 
         for sp, key, dflt in ((self.sp_x, 'x', 3000), (self.sp_y, 'y', 60),
                               (self.sp_w, 'w', 470), (self.sp_h, 'h', 580)):
@@ -383,6 +612,14 @@ class ControlWindow(QMainWindow):
                                  if self.overlay._mode == 'grid' else '下落式'))
         self.btn_mode.setText('切到下落式'
                               if self.overlay._mode == 'grid' else '切到 4×4 网格')
+
+        self.sp_count.setValue(int(cfg.get('countdown', 3)))
+        self.cmb_hk_play.setCurrentIndex(
+            choice_index_by_name(cfg.get('hk_play', '不绑定')))
+        self.cmb_hk_restart.setCurrentIndex(
+            choice_index_by_name(cfg.get('hk_restart', '不绑定')))
+        self.cmb_hk_listen.setCurrentIndex(
+            choice_index_by_name(cfg.get('hk_listen', '不绑定')))
 
         last = cfg.get('last_sheet')
         if not (last and os.path.isfile(last)):
@@ -401,6 +638,13 @@ class ControlWindow(QMainWindow):
             'preview': self.sp_preview.value(),
             'mode': self.overlay._mode,
             'last_sheet': self.path,
+            'hk_play': self.cmb_hk_play.currentText(),
+            'hk_restart': self.cmb_hk_restart.currentText(),
+            'hk_listen': self.cmb_hk_listen.currentText(),
+            'countdown': self.sp_count.value(),
+            'listen_device': (self._listen.cmb_dev.currentText()
+                              if self._listen is not None else
+                              self._cfg.get('listen_device', '')),
         }
         try:
             with open(config_path(), 'w', encoding='utf-8') as f:
@@ -410,7 +654,16 @@ class ControlWindow(QMainWindow):
 
     # ------------------------------------------------------------------
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 窗口真正显示之后句柄才有效，这时再注册全局热键
+        QTimer.singleShot(300, self._apply_hotkeys)
+
     def closeEvent(self, event):
+        try:
+            self.hotkeys.unbind_all()
+        except Exception:
+            pass
         self._save_config()
         self.overlay.hide()
         self.overlay.close()

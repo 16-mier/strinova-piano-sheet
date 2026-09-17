@@ -1,12 +1,19 @@
 # -*- coding: utf-8 -*-
-"""时间轴编辑器 —— 钢琴卷帘。
+"""时间轴编辑器 —— 钢琴卷帘 + 区域选择。
 
 横向 = 拍数，纵向 = **16 行，每个键一行**（跟游戏里一样：`1''` 在最上、`1` 在最下）。
-每个音符是一个方块，**左右拖动就能改它跟前一个音之间的间距** ——
-拖动时自动往文本谱面里插/删休止符，松手即时生效。
 
-点击空白 = 把播放头挪到那里；双击音符 = 从它开始播；
-Ctrl + 滚轮 = 缩放；左右方向键 = 微调选中音符的间距。
+操作一览
+    拖音符            改它跟前一个音之间的间距（自动插/删休止符）
+    点音符            选中 + 试听
+    双击音符          从它这里开始播
+    在空白处拖        框选一段区域
+    点空白            把播放头挪过去
+    Ctrl + 滚轮       缩放
+    左右方向键        微调选中音符的间距（1/4 拍）
+    Delete            有选区就删选区，否则删选中的音
+    Ctrl + A          全选
+    Esc               取消选区
 """
 
 from __future__ import annotations
@@ -25,14 +32,18 @@ HEADER_W = 58       # 左边音名列宽
 SNAP = 0.25         # 拖动吸附精度（拍）
 TOTAL_ROWS = 16     # 4×4
 
+SEL_FILL = QColor(86, 168, 255, 58)
+SEL_EDGE = QColor(130, 195, 255, 190)
+
 
 class TimelineEditor(QWidget):
-    """钢琴卷帘编辑器。"""
+    """钢琴卷帘编辑器（支持框选）。"""
 
     note_clicked = pyqtSignal(str)      # 点了某个音（用于试听）
     changed = pyqtSignal()              # 模型被改过
     playhead_moved = pyqtSignal(float)  # 播放头挪到第几拍
     seek_requested = pyqtSignal(float)  # 请求从某拍开始播
+    selection_changed = pyqtSignal()    # 选区变了
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -40,6 +51,14 @@ class TimelineEditor(QWidget):
         self.px_per_beat = 64.0
         self.selected: EdNote | None = None
         self.playhead = 0.0
+
+        # 选区（拍）
+        self.sel_start: float | None = None
+        self.sel_end: float | None = None
+        self._band_anchor: float | None = None
+        self._band_moved = False
+
+        # 拖动音符
         self._dragging = False
         self._drag_x0 = 0.0
         self._drag_gap0 = 0.0
@@ -54,6 +73,15 @@ class TimelineEditor(QWidget):
         self.model = model
         self.selected = None
         self.playhead = 0.0
+        self.clear_selection()
+        self._update_size()
+        self.update()
+
+    def set_model_keep_head(self, model: EditModel | None, playhead: float):
+        """换模型但**保留播放头**（打谱时用，不然每敲一下都被踢回开头）。"""
+        self.model = model
+        self.selected = None
+        self.set_playhead(playhead)
         self._update_size()
         self.update()
 
@@ -68,6 +96,53 @@ class TimelineEditor(QWidget):
             return
         w = HEADER_W + int(self.model.total_beats * self.px_per_beat) + 60
         self.setMinimumWidth(max(400, w))
+
+    # ---------------- 选区 ----------------
+
+    def selection_beats(self) -> tuple[float, float] | None:
+        """返回 (起, 止) 拍；没有有效选区时返回 None。"""
+        if self.sel_start is None or self.sel_end is None:
+            return None
+        if abs(self.sel_end - self.sel_start) < 1e-6:
+            return None
+        return (min(self.sel_start, self.sel_end),
+                max(self.sel_start, self.sel_end))
+
+    def has_selection(self) -> bool:
+        return self.selection_beats() is not None
+
+    def select_all(self):
+        if self.model and self.model.notes:
+            self.sel_start, self.sel_end = 0.0, self.model.total_beats
+            self.update()
+            self.selection_changed.emit()
+
+    def clear_selection(self):
+        self.sel_start = self.sel_end = None
+        self._band_anchor = None
+        self.update()
+        self.selection_changed.emit()
+
+    def set_selection(self, a: float, b: float):
+        if self.model:
+            a = max(0.0, min(a, self.model.total_beats))
+            b = max(0.0, min(b, self.model.total_beats))
+        self.sel_start, self.sel_end = a, b
+        self.update()
+        self.selection_changed.emit()
+
+    def delete_selection(self) -> int:
+        """删除选区内的块（后面的内容往前接上）。"""
+        rng = self.selection_beats()
+        if not rng or not self.model:
+            return 0
+        n = self.model.remove_range(*rng)
+        self.clear_selection()
+        self.selected = None
+        self._update_size()
+        self.update()
+        self.changed.emit()
+        return n
 
     # ---------------- 坐标 ----------------
 
@@ -97,7 +172,7 @@ class TimelineEditor(QWidget):
         if not self.model or pos.x() < HEADER_W:
             return None
         beat = self._x_beat(pos.x())
-        for n in reversed(self.model.notes):      # 后画的优先命中
+        for n in reversed(self.model.notes):
             if n.is_rest:
                 continue
             if not (n.start - 0.001 <= beat <= n.end + 0.001):
@@ -116,7 +191,9 @@ class TimelineEditor(QWidget):
             return
         pos = event.position()
         hit = self._hit(pos)
+
         if hit is not None:
+            # --- 拖音符 ---
             self.selected = hit
             self._dragging = True
             self._drag_moved = False
@@ -127,32 +204,67 @@ class TimelineEditor(QWidget):
                 self.note_clicked.emit(pitch)
             self.update()
         else:
+            # --- 可能是框选，也可能只是点一下 ---
             beat = max(0.0, self._x_beat(pos.x()))
+            self._band_anchor = beat
+            self._band_moved = False
             self._dragging = False
-            self.set_playhead(beat)
-            self.playhead_moved.emit(self.playhead)
+            if not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+                self.clear_selection()
         event.accept()
 
     def mouseMoveEvent(self, event):
-        if not (self._dragging and self.model and self.selected):
+        if not self.model:
             super().mouseMoveEvent(event)
             return
-        dx = event.position().x() - self._drag_x0
-        if abs(dx) > 3:
-            self._drag_moved = True
-        want = self._drag_gap0 + dx / max(1e-6, self.px_per_beat)
-        want = max(0.0, round(want / SNAP) * SNAP)
-        if self.model.set_gap_of(self.selected, want):
-            self._update_size()
-            self.update()
-            self.changed.emit()
-        event.accept()
+        pos = event.position()
+
+        # --- 框选 ---
+        if self._band_anchor is not None:
+            cur = max(0.0, self._x_beat(pos.x()))
+            if abs(cur - self._band_anchor) * self.px_per_beat > 4:
+                self._band_moved = True
+            if self._band_moved:
+                self.sel_start, self.sel_end = self._band_anchor, cur
+                self.update()
+                self.selection_changed.emit()
+            event.accept()
+            return
+
+        # --- 拖音符 ---
+        if self._dragging and self.selected:
+            dx = pos.x() - self._drag_x0
+            if abs(dx) > 3:
+                self._drag_moved = True
+            want = self._drag_gap0 + dx / max(1e-6, self.px_per_beat)
+            want = max(0.0, round(want / SNAP) * SNAP)
+            if self.model.set_gap_of(self.selected, want):
+                self._update_size()
+                self.update()
+                self.changed.emit()
+            event.accept()
+            return
+
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        # --- 结束框选 ---
+        if self._band_anchor is not None:
+            was_moved = self._band_moved
+            anchor = self._band_anchor
+            self._band_anchor = None
+            self._band_moved = False
+            if not was_moved:
+                # 没拖动 = 只是点了一下空白：移动播放头
+                self.set_playhead(max(0.0, anchor))
+                self.playhead_moved.emit(self.playhead)
+            event.accept()
+            return
+
+        # --- 结束拖音符 ---
         if self._dragging:
             self._dragging = False
             if not self._drag_moved and self.model and self.selected:
-                # 只是点了一下没拖 —— 把播放头挪到这个音
                 self.set_playhead(self.selected.start)
                 self.playhead_moved.emit(self.playhead)
             event.accept()
@@ -182,20 +294,42 @@ class TimelineEditor(QWidget):
         super().wheelEvent(event)
 
     def keyPressEvent(self, event):
-        """左右方向键 = 微调选中音符的间距（一次 0.25 拍）。"""
-        if self.model and self.selected is not None:
-            step = SNAP
-            if event.key() == Qt.Key.Key_Left:
-                self.model.set_gap_of(
-                    self.selected,
-                    max(0.0, self.model.gap_of(self.selected) - step))
-            elif event.key() == Qt.Key.Key_Right:
-                self.model.set_gap_of(
-                    self.selected,
-                    self.model.gap_of(self.selected) + step)
-            elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+        key = event.key()
+        mods = event.modifiers()
+
+        if key == Qt.Key.Key_Escape:
+            self.clear_selection()
+            self.selected = None
+            self.update()
+            event.accept()
+            return
+
+        if key == Qt.Key.Key_A and mods & Qt.KeyboardModifier.ControlModifier:
+            self.select_all()
+            event.accept()
+            return
+
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            if self.has_selection():
+                self.delete_selection()
+            elif self.model and self.selected is not None:
                 self.model.remove_note(self.model.index_of(self.selected))
                 self.selected = None
+                self._update_size()
+                self.update()
+                self.changed.emit()
+            event.accept()
+            return
+
+        if self.model and self.selected is not None:
+            if key == Qt.Key.Key_Left:
+                self.model.set_gap_of(
+                    self.selected,
+                    max(0.0, self.model.gap_of(self.selected) - SNAP))
+            elif key == Qt.Key.Key_Right:
+                self.model.set_gap_of(
+                    self.selected,
+                    self.model.gap_of(self.selected) + SNAP)
             else:
                 super().keyPressEvent(event)
                 return
@@ -204,6 +338,7 @@ class TimelineEditor(QWidget):
             self.changed.emit()
             event.accept()
             return
+
         super().keyPressEvent(event)
 
     # ---------------- 绘制 ----------------
@@ -236,6 +371,15 @@ class TimelineEditor(QWidget):
                 c.setAlpha(30 if (row + col) % 2 else 14)
                 p.setBrush(QBrush(c))
                 p.drawRect(QRectF(HEADER_W, y, w - HEADER_W, ROW_H))
+
+        # ---- 选区高亮（画在网格下面、音符上面之前更有层次）----
+        rng = self.selection_beats()
+        if rng:
+            x1 = self._beat_x(rng[0])
+            x2 = self._beat_x(rng[1])
+            p.setPen(QPen(SEL_EDGE, 1.2))
+            p.setBrush(QBrush(SEL_FILL))
+            p.drawRect(QRectF(x1, 0, max(1.0, x2 - x1), h))
 
         # ---- 拍网格 ----
         f = QFont()
@@ -277,6 +421,8 @@ class TimelineEditor(QWidget):
             if n.is_rest:
                 continue
             sel = (n is self.selected)
+            in_sel = bool(rng and n.end > rng[0] + 1e-9
+                          and n.start < rng[1] - 1e-9)
             for pitch in n.pitches:
                 r = self._note_rect(n, pitch)
                 if r is None:
@@ -288,7 +434,9 @@ class TimelineEditor(QWidget):
                     p.setPen(QPen(QColor(255, 255, 255), 2.2))
                     p.setBrush(QBrush(T.ACTIVE))
                 else:
-                    p.setPen(QPen(base.lighter(125), 1.2))
+                    edge = QColor(255, 255, 255, 230) if in_sel \
+                        else base.lighter(125)
+                    p.setPen(QPen(edge, 2.0 if in_sel else 1.2))
                     p.setBrush(QBrush(base))
                 p.drawRoundedRect(r, 5, 5)
 
@@ -307,7 +455,7 @@ class TimelineEditor(QWidget):
             p.setPen(QPen(QColor(255, 96, 96), 2.0))
             p.drawLine(int(px), 0, int(px), h)
 
-        # ---- 左侧音名列（画在最上面盖住网格）----
+        # ---- 左侧音名列 ----
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(QColor(16, 19, 27, 240)))
         p.drawRect(QRectF(0, 0, HEADER_W, h))
@@ -322,7 +470,6 @@ class TimelineEditor(QWidget):
                 y = self._cell_y(row, col)
                 pitch = layout.cell_to_pitch(row, col)
                 zone = T.ZONE_COLORS[T.zone_of(row)]
-                # 音区小色块
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QBrush(zone))
                 p.drawRoundedRect(QRectF(4, y + ROW_H / 2 - 3, 6, 6), 2, 2)

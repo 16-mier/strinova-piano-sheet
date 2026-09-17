@@ -159,15 +159,51 @@ class EditorDialog(QDialog):
         self.btn_stop.setFixedHeight(30)
         self.btn_home = QPushButton('⏮  回到开头')
         self.btn_home.setFixedHeight(30)
+
+        self.btn_play_sel = QPushButton('▶  听到选区结尾')
+        self.btn_del_sel = QPushButton('🗑  删除选区')
+        self.btn_sel_all = QPushButton('全选')
+        self.btn_clear_sel = QPushButton('取消选区')
+        self.btn_clear_all = QPushButton('全删')
+        for b in (self.btn_play_sel, self.btn_del_sel, self.btn_sel_all,
+                  self.btn_clear_sel, self.btn_clear_all):
+            b.setFixedHeight(30)
+        self.btn_clear_all.setStyleSheet(
+            'QPushButton{color:#ff9a9a;}')
+
         self.lbl_pos = QLabel('位置：第 0 拍')
         self.lbl_pos.setStyleSheet('color:#9aa3b8;')
+
         rowp = QHBoxLayout()
         rowp.addWidget(self.btn_play)
         rowp.addWidget(self.btn_stop)
         rowp.addWidget(self.btn_home)
-        rowp.addSpacing(16)
+        rowp.addSpacing(10)
+        rowp.addWidget(self.btn_play_sel)
+        rowp.addWidget(self.btn_del_sel)
+        rowp.addSpacing(10)
+        rowp.addWidget(self.btn_sel_all)
+        rowp.addWidget(self.btn_clear_sel)
+        rowp.addWidget(self.btn_clear_all)
+        rowp.addSpacing(10)
         rowp.addWidget(self.lbl_pos, 1)
         tlb.addLayout(rowp)
+
+        # 写入位置：打击垫敲的音符落在哪儿
+        self.cmb_write = QComboBox()
+        self.cmb_write.addItem('写入位置：时间轴播放头', 'head')
+        self.cmb_write.addItem('写入位置：谱面文本光标', 'cursor')
+        self.cmb_write.setToolTip(
+            '时间轴播放头：在下面时间轴上点一下定位，再敲打击垫，'
+            '音符就插在那儿（可以配合选区）\n'
+            '谱面文本光标：跟你手写文本一样，插在光标处')
+        rowq = QHBoxLayout()
+        rowq.addWidget(self.cmb_write)
+        self.lbl_sel = QLabel('没有选区')
+        self.lbl_sel.setStyleSheet('color:#7f8aa3;')
+        rowq.addSpacing(12)
+        rowq.addWidget(self.lbl_sel, 1)
+        tlb.addLayout(rowq)
 
         # ================= 底部 =================
         self.info = QLabel('')
@@ -233,6 +269,13 @@ class EditorDialog(QDialog):
         self.btn_stop.clicked.connect(self.player.stop)
         self.btn_home.clicked.connect(
             lambda: (self.tl_edit.set_playhead(0.0), self._on_playhead(0.0)))
+
+        self.btn_play_sel.clicked.connect(self._play_selection)
+        self.btn_del_sel.clicked.connect(self._delete_selection)
+        self.btn_sel_all.clicked.connect(self.tl_edit.select_all)
+        self.btn_clear_sel.clicked.connect(self.tl_edit.clear_selection)
+        self.btn_clear_all.clicked.connect(self._clear_all)
+        self.tl_edit.selection_changed.connect(self._update_sel_label)
         self.btn_save.clicked.connect(self.save)
         self.btn_save_as.clicked.connect(self.save_as)
         self.btn_sample.clicked.connect(
@@ -246,6 +289,24 @@ class EditorDialog(QDialog):
             return
         gap = float(self.cmb_gap.currentData() or 1.0)
         toks = tokens_for(pitch, gap)
+
+        if self.cmb_write.currentData() == 'head' and self.model is not None:
+            # 写进时间轴 —— 落在播放头（有选区就落选区起点）那里
+            rng = self.tl_edit.selection_beats()
+            at = rng[0] if rng else self.tl_edit.playhead
+            idx = self.model.rest_index_after_beat(at)
+            self.model.insert_tokens(idx, toks)
+
+            total = sum(parser.token_duration(t)[0] for t in toks)
+            self._syncing = True
+            self.text.setPlainText(self.model.rebuild())
+            self._syncing = False
+            self.player.set_model(self.model)
+            self.tl_edit.set_model_keep_head(self.model, at + total)
+            self._update_info(None)
+            return
+
+        # 写进谱面文本的光标处
         self._insert(' '.join(toks) + ' ')
 
     def _insert(self, s: str):
@@ -307,6 +368,54 @@ class EditorDialog(QDialog):
         self.player.bpm = self._bpm()
         self.tl_edit.set_playhead(beat)
         self.player.play_from(beat)
+
+    # ---------------- 区域操作 ----------------
+
+    def _play_selection(self):
+        """从选区起点播到选区终点。"""
+        rng = self.tl_edit.selection_beats()
+        if not rng:
+            self.lbl_pos.setText('还没有选区 —— 在时间轴空白处拖一下就框选了')
+            return
+        self.player.bpm = self._bpm()
+        self.tl_edit.set_playhead(rng[0])
+        self.player.play_from(rng[0], stop_at=rng[1])
+        self.lbl_pos.setText('播放选区：第 %.2f ~ %.2f 拍' % rng)
+
+    def _delete_selection(self):
+        rng = self.tl_edit.selection_beats()
+        if not rng:
+            self.lbl_pos.setText('没有选区可删 —— 在时间轴空白处拖一下框选')
+            return
+        n = self.tl_edit.delete_selection()
+        self.lbl_pos.setText('已删除选区内的 %d 个块（后面的已往前接上）' % n)
+
+    def _clear_all(self):
+        if not (self.model and self.model.notes):
+            return
+        r = QMessageBox.question(
+            self, '全删', '确定要把整份谱面清空吗？',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if r != QMessageBox.StandardButton.Yes:
+            return
+        self.model.clear_all()
+        self._syncing = True
+        self.text.setPlainText('')
+        self._syncing = False
+        self.player.set_model(self.model)
+        self.tl_edit.set_model(self.model)
+        self._update_info(None)
+        self.lbl_pos.setText('已清空')
+
+    def _update_sel_label(self):
+        rng = self.tl_edit.selection_beats()
+        if not rng:
+            self.lbl_sel.setText('没有选区（在时间轴空白处拖一下就能框选）')
+        else:
+            self.lbl_sel.setText(
+                '已选 %.2f ~ %.2f 拍（共 %.2f 拍，%d 个块）'
+                % (rng[0], rng[1], rng[1] - rng[0],
+                   len(self.model.notes_in_range(*rng)) if self.model else 0))
 
     def _on_player_tick(self, beat: float):
         self.tl_edit.set_playhead(beat)

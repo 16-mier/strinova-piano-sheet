@@ -26,6 +26,7 @@ class EditPlayer(QObject):
         self._base = 0.0
         self._clock = QElapsedTimer()
         self._fired: set[int] = set()
+        self._stop_at: float | None = None
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.setInterval(12)
@@ -36,11 +37,13 @@ class EditPlayer(QObject):
             self.stop()
         self.model = model
 
-    def play_from(self, beat: float):
+    def play_from(self, beat: float, stop_at: float | None = None):
+        """从 beat 开始播；给了 stop_at 就播到那儿自动停（选区试听用）。"""
         if not self.model or not self.model.notes:
             return
         self.beat = max(0.0, min(beat, self.model.total_beats))
         self._base = self.beat
+        self._stop_at = stop_at
         self._fired = set()
         self._clock.restart()
         self.playing = True
@@ -61,6 +64,14 @@ class EditPlayer(QObject):
             return
         spb = 60.0 / max(1, self.bpm)
         self.beat = self._base + self._clock.elapsed() / 1000.0 / spb
+
+        # 到指定的结尾就停（选区试听）
+        if self._stop_at is not None and self.beat >= self._stop_at:
+            self.beat = self._stop_at
+            self.tick.emit(self.beat)
+            self.stop()
+            self.finished.emit()
+            return
 
         if self.beat >= self.model.total_beats:
             self.beat = self.model.total_beats

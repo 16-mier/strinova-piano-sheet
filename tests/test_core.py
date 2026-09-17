@@ -5,7 +5,8 @@ import math
 
 import pytest
 
-from core import edit_model, encode, layout, parser, timeline
+from core import (edit_model, encode, layout, parser, timeline,
+                  transcribe)
 
 
 # ---------------- 时值：先加法，后乘法 ----------------
@@ -378,3 +379,143 @@ def test_remove_note():
     m.remove_note(1)
     t = timeline.Timeline(parser.parse(m.rebuild()))
     assert len(t.items) == 2
+
+
+# ---------------- 区域操作（框选 / 删除 / 插入） ----------------
+
+def _audio(m):
+    t = timeline.Timeline(parser.parse(m.rebuild()))
+    return [it for it in t.items if not it.chord.is_rest]
+
+
+def test_notes_in_range():
+    # 1 占 0~1 拍，2 占 1~2，3 占 2~3，4 占 3~4
+    # 区间 [1.0, 2.5) 只跟 2 和 3 重叠
+    m = edit_model.EditModel(parser.parse('1 2 3 4'))
+    got = m.notes_in_range(1.0, 2.5)
+    assert [n.raw for n in got] == ['2', '3']
+
+
+def test_remove_range_ripples():
+    """删掉中间一段，后面的要往前接上。"""
+    m = edit_model.EditModel(parser.parse('1 2 3 4'))
+    n = m.remove_range(1.0, 3.0)
+    assert n == 2
+    audio = _audio(m)
+    assert [it.chord.pitches[0] for it in audio] == ['1', '4']
+    assert math.isclose(audio[1].start_beat, 1.0)
+
+
+def test_remove_range_partial():
+    """只要跟区间有重叠就会被删（按重叠算，不是包含）。"""
+    m = edit_model.EditModel(parser.parse('1 2 3'))
+    # [1.5, 2.5) 同时压到 2（1~2）和 3（2~3）
+    n = m.remove_range(1.5, 2.5)
+    assert n == 2
+    assert [it.chord.pitches[0] for it in _audio(m)] == ['1']
+
+
+def test_clear_all():
+    m = edit_model.EditModel(parser.parse('1 2 3'))
+    m.clear_all()
+    assert not m.notes
+    assert m.total_beats == 0.0
+    assert m.rebuild() == ''
+
+
+def test_insert_tokens_at_position():
+    m = edit_model.EditModel(parser.parse('1 3'))
+    idx = m.rest_index_after_beat(1.0)
+    m.insert_tokens(idx, ['2'])
+    audio = _audio(m)
+    assert [it.chord.pitches[0] for it in audio] == ['1', '2', '3']
+    assert math.isclose(audio[1].start_beat, 1.0)
+
+
+def test_insert_tokens_with_gap():
+    """间距 2 拍 = 一个音 + 停一拍（音紧跟在前一个后面，停一拍之后才是下一个）。"""
+    m = edit_model.EditModel(parser.parse('1'))
+    m.insert_tokens(1, ['5', '-'])
+    audio = _audio(m)
+    assert len(audio) == 2
+    assert math.isclose(audio[1].start_beat, 1.0)     # 5 紧跟在 1 后面
+    assert math.isclose(m.total_beats, 3.0)           # 1 拍音 + 1 拍音 + 1 拍停
+    t = timeline.Timeline(parser.parse(m.rebuild()))
+    assert math.isclose(t.total_beats, 3.0)
+
+
+def test_tokens_for_gap_sizes():
+    from ui.editor import tokens_for
+    assert tokens_for('1', 0.25) == ['^^1']
+    assert tokens_for('1', 0.5) == ['^1']
+    assert tokens_for('1', 1.0) == ['1']
+    assert tokens_for('1', 2.0) == ['1', '-']
+    assert tokens_for('1', 3.0) == ['1', '--']
+
+
+def test_rest_index_after_beat():
+    m = edit_model.EditModel(parser.parse('1 2 3'))
+    assert m.rest_index_after_beat(0.0) == 0
+    assert m.rest_index_after_beat(1.0) == 1
+    assert m.rest_index_after_beat(99.0) == 3
+
+
+# ---------------- 听音记谱 ----------------
+
+def test_pitch_freq_table():
+    assert math.isclose(transcribe.pitch_freq('1'), 261.63, abs_tol=0.1)
+    assert math.isclose(transcribe.pitch_freq('8'), 523.25, abs_tol=0.1)
+    assert math.isclose(transcribe.pitch_freq("1'"), 523.25, abs_tol=0.1)
+    assert math.isclose(transcribe.pitch_freq("1''"), 1046.5, abs_tol=0.3)
+    # 8 和 1' 在乐理上是同一个音高（游戏里是两个键）
+    assert math.isclose(transcribe.pitch_freq('8'),
+                        transcribe.pitch_freq("1'"), abs_tol=1e-6)
+
+
+def test_key_freqs_cover_all_16():
+    assert len(transcribe.KEY_FREQS) == 16
+
+
+def test_nearest_pitch_matches():
+    p, cents = transcribe.nearest_pitch(261.0)
+    assert p == '1'
+    assert abs(cents) < 50
+    p2, _ = transcribe.nearest_pitch(1040.0)
+    assert p2 in ("1''", '7\'')
+    # 完全跑调的音会给出很大的偏差
+    _p3, big = transcribe.nearest_pitch(100.0)
+    assert abs(big) > 200
+
+
+def test_transcribe_silence():
+    import numpy as np
+    tok, hits = transcribe.transcribe(
+        np.zeros(24000, dtype=np.float32), 48000)
+    assert tok == []
+    assert hits == []
+
+
+def test_transcribe_synthetic_sine():
+    """自己合成「1 3 5」，认出来的必须是期望序列的前缀（可能少认几个）。
+
+    注：偶尔会漏掉末尾的音 —— 见 DEVELOPMENT.md 的「已知问题」。
+    这里只锁住"不会认错音、不会乱序"这个底线。
+    """
+    import numpy as np
+
+    rate = 48000
+    seq = ['1', '3', '5']
+    spb = 0.5
+    total = int(len(seq) * spb * rate) + rate
+    audio = np.zeros(total, dtype=np.float64)
+    for i, p in enumerate(seq):
+        f = transcribe.pitch_freq(p)
+        n = int(spb * rate * 0.7)
+        t = np.arange(n) / rate
+        audio[i * int(spb * rate):][:n] += (
+            np.sin(2 * np.pi * f * t) * np.exp(-4.0 * t) * 0.8)
+
+    _tok, hits = transcribe.transcribe(audio, rate, bpm=120)
+    got = [h.pitch for h in hits]
+    assert len(got) >= 2, '只认出 %d 个: %s' % (len(got), got)
+    assert got == seq[:len(got)], '认出 %s，期望是 %s 的前缀' % (got, seq[:len(got)])

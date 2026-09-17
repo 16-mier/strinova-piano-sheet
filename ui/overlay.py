@@ -12,13 +12,25 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes as _wintypes
 
 from PyQt6.QtCore import QElapsedTimer, QObject, Qt, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from core.timeline import Timeline
 
 from .views import FallView, GridView
+
+
+class _MSG(ctypes.Structure):
+    """Win32 MSG（nativeEvent 里拿到的是它的指针）。"""
+
+    _fields_ = [('hwnd', _wintypes.HWND),
+                ('message', _wintypes.UINT),
+                ('wParam', _wintypes.WPARAM),
+                ('lParam', _wintypes.LPARAM),
+                ('time', _wintypes.DWORD),
+                ('pt', _wintypes.POINT)]
 
 # ---- Win32 常量（用于运行时切换鼠标穿透）----
 GWL_EXSTYLE = -20
@@ -146,6 +158,35 @@ class OverlayWindow(QWidget):
         lay.addWidget(self.fall_view)
         self.fall_view.hide()
 
+        # 倒计时大字（压在谱面上，倒数完自动开播）
+        self.lbl_count = QLabel('', self)
+        self.lbl_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_count.setStyleSheet(
+            'QLabel{color:#ffd230;font-size:72px;font-weight:bold;'
+            'background:rgba(8,10,16,190);border-radius:20px;'
+            'border:3px solid rgba(255,210,48,160);}')
+        self.lbl_count.hide()
+
+        # 小提示条（热键触发的状态反馈，不抢焦点）
+        self.lbl_toast = QLabel('', self)
+        self.lbl_toast.setWordWrap(True)
+        self.lbl_toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_toast.setStyleSheet(
+            'QLabel{color:#e8ecf8;font-size:15px;'
+            'background:rgba(8,10,16,205);border-radius:12px;'
+            'border:2px solid rgba(120,200,255,150);padding:10px;}')
+        self.lbl_toast.hide()
+        self._toast_timer = QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(self.lbl_toast.hide)
+
+        self.hotkeys = None          # 由控制窗注入 HotkeyManager
+        self._count_left = 0
+        self._count_done = None
+        self._count_timer = QTimer(self)
+        self._count_timer.setInterval(1000)
+        self._count_timer.timeout.connect(self._on_count_tick)
+
         self._drag_offset = None
         self.resize(470, 580)
 
@@ -227,3 +268,81 @@ class OverlayWindow(QWidget):
     def mouseReleaseEvent(self, event):
         self._drag_offset = None
         super().mouseReleaseEvent(event)
+
+    # ---- 倒计时 ----
+
+    def start_countdown(self, seconds: int, on_done):
+        """在谱面窗上倒数若干秒，数完调用 on_done（用来争取就位时间）。"""
+        self.cancel_countdown()
+        if seconds <= 0:
+            on_done()
+            return
+        self._count_left = int(seconds)
+        self._count_done = on_done
+        self._relayout_count()
+        self.lbl_count.setText(str(self._count_left))
+        self.lbl_count.show()
+        self.lbl_count.raise_()
+        self._count_timer.start()
+
+    def cancel_countdown(self):
+        self._count_timer.stop()
+        self.lbl_count.hide()
+        self._count_done = None
+        self._count_left = 0
+
+    @property
+    def counting(self) -> bool:
+        return self._count_left > 0
+
+    def _on_count_tick(self):
+        self._count_left -= 1
+        if self._count_left <= 0:
+            self._count_timer.stop()
+            self.lbl_count.hide()
+            cb = self._count_done
+            self._count_done = None
+            if cb:
+                cb()
+            return
+        self.lbl_count.setText(str(self._count_left))
+
+    def _relayout_count(self):
+        w = max(120, min(self.width() - 40, 280))
+        h = max(90, min(self.height() - 40, 210))
+        self.lbl_count.setGeometry((self.width() - w) // 2,
+                                   (self.height() - h) // 2, w, h)
+
+    # ---- 小提示条 ----
+
+    def show_toast(self, text: str, seconds: float = 2.5):
+        """在谱面窗上闪一条提示 —— 用热键操作时给你反馈，又不会抢焦点。"""
+        self.lbl_toast.setText(text)
+        w = max(160, min(self.width() - 30, 400))
+        h = max(46, min(self.height() // 4, 120))
+        self.lbl_toast.setGeometry((self.width() - w) // 2,
+                                   self.height() - h - 16, w, h)
+        self.lbl_toast.show()
+        self.lbl_toast.raise_()
+        self._toast_timer.start(int(max(0.5, seconds) * 1000))
+
+    def hide_toast(self):
+        self._toast_timer.stop()
+        self.lbl_toast.hide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.lbl_count.isVisible():
+            self._relayout_count()
+
+    # ---- 全局热键消息 ----
+
+    def nativeEvent(self, event_type, message):
+        if self.hotkeys is not None:
+            try:
+                msg = _MSG.from_address(int(message))
+                if self.hotkeys.handle_native(msg.message, msg.wParam):
+                    return True, 0
+            except Exception:
+                pass
+        return super().nativeEvent(event_type, message)

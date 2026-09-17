@@ -175,6 +175,70 @@ class EditModel:
         self.notes.pop(i)
         self._reflow(max(0, i - 1))
 
+    # ---------------- 区域操作 ----------------
+
+    def notes_in_range(self, start_beat: float,
+                       end_beat: float) -> list[EdNote]:
+        """落在 [start, end) 里的块（跟区间有重叠就算）。"""
+        if end_beat < start_beat:
+            start_beat, end_beat = end_beat, start_beat
+        out = []
+        for n in self.notes:
+            if n.end > start_beat + 1e-9 and n.start < end_beat - 1e-9:
+                out.append(n)
+        return out
+
+    def remove_range(self, start_beat: float, end_beat: float) -> int:
+        """删掉 [start, end) 范围内的块，后面的内容往前接上。
+
+        返回删掉了几个块。这是「剪切式」删除：不留空档。
+        """
+        if end_beat < start_beat:
+            start_beat, end_beat = end_beat, start_beat
+        keep = [n for n in self.notes
+                if not (n.end > start_beat + 1e-9
+                        and n.start < end_beat - 1e-9)]
+        removed = len(self.notes) - len(keep)
+        if removed:
+            self.notes = keep
+            self._reflow(0)
+        return removed
+
+    def clear_all(self):
+        """全删。"""
+        self.notes = []
+        self.total_beats = 0.0
+
+    def rest_index_after_beat(self, beat: float) -> int:
+        """找一个合适的插入位置索引（返回第一个起始拍 >= beat 的块下标）。"""
+        for i, n in enumerate(self.notes):
+            if n.start >= beat - 1e-9:
+                return i
+        return len(self.notes)
+
+    def insert_tokens(self, index: int, tokens: list[str]) -> int:
+        """在指定下标处插入一批 token，返回插入的块数。"""
+        from .parser import token_duration
+        if not tokens:
+            return 0
+        index = max(0, min(index, len(self.notes)))
+        base = (self.notes[index].start if index < len(self.notes)
+                else self.total_beats)
+        items = []
+        cursor = base
+        for tok in tokens:
+            dur, is_rest = token_duration(tok)
+            body = tok
+            for ch in ('^', '-', '~'):
+                body = body.replace(ch, '')
+            pitches = [p for p in body.split('&') if p] if not is_rest else []
+            items.append(EdNote(pitches=pitches, raw=tok, start=cursor,
+                                dur=dur, is_rest=is_rest))
+            cursor += dur
+        self.notes[index:index] = items
+        self._reflow(index)
+        return len(items)
+
     # ---------------- 回写 ----------------
 
     def rebuild(self) -> str:
