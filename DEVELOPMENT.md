@@ -8532,5 +8532,76 @@ if self.keys_only:
 `_verify_pad.py` 16 项重跑全过；单元测试 **165 passed**。
 
 
+## 16.56 开源：清理、README、以及为什么音源不进仓库
+
+2026-09-19，项目第一次公开：
+
+> https://github.com/16-mier/strinova-piano-sheet
+
+MIT 许可。
+
+### 清理：`.gitignore` 骗了我
+
+`git status` 从 147 项降到 77 项的时候，看着挺干净 —— 但那只是
+`.gitignore` **挡住了未跟踪的文件**。已经在索引里的东西，规则对它
+一点用都没有 —— 74 个文件就这么一路跟着推出了远端。
+
+判据不能是"我写了规则"，得是 **`git ls-files`**：
+
+| 类别 | 数量 | 处理 |
+| --- | --- | --- |
+| 开发期日志 / 探针输出（`_*.txt`、`_*.wav`、`exe.err`） | 10 | `git rm --cached` |
+| 游戏采样转出来的 wav（`assets/notes*`） | 48 | 同上 |
+| 游戏 `.pck` 里挖出来的 QOA 原始块（`assets/notes_raw`） | 16 | 同上 |
+
+跟踪文件 **148 → 74**。文件只是从索引里摘掉，磁盘上原样留着，
+本地跑不受影响。历史里的旧 blob 没动（那要重写历史，不值得）。
+
+### ★ 为什么游戏音源一个字节都不进仓库 ★
+
+`assets/notes_raw/*.qoa` 那 16 个，是从卡拉彼丘的 `.pck` 里挖出来的
+原始音频块（§7 记着当时怎么发现的）；`assets/notes_game/` 和
+`assets/notes/` 里的 wav 就是从它们转出来的。
+三处字节数一模一样，一看就是同一批东西：
+
+```
+assets\notes\1.wav          184,234
+assets\notes_game\qoa_01.wav 184,234     ← 同一个文件
+assets\notes_raw\qoa_01.qoa   37,200     ← 它的 QOA 原始块
+```
+
+**代码用 MIT 开源是一回事，把别人的游戏素材打包分发是另一回事。**
+
+程序不依赖它们 —— `ui/keypad.py` 载入音源时走
+`core/synth.py::ensure_notes()`：目录不在就 `makedirs`，
+某个音的文件不在就现合成一个（正弦 + 包络）。
+一份干净的 clone 直接能跑，只是音色朴素。
+
+> 顺带看清了 `ensure_notes()` 里那句
+> `if force or not os.path.isfile(path)` 的实际效果：
+> **文件在就用文件，不在才合成。**
+> 本地那份游戏音源照样是当前音色，而仓库里啥也不带 ——
+> 这个设计一开始就是对的，只是没人从"分发"这个角度看过它。
+
+### README 里写了什么
+
+开源仓库的 README 特意把**合规边界**放在最前面，而且写成能核对的：
+
+* 主程序不读内存、不注入、不模拟输入、不截屏、不联网；
+* 唯一碰系统的地方是 `core/winfocus.py` 的
+  `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` ——
+  只查前台窗口属于哪个进程，**不读那个进程的内存**；
+* `tools/` 里确实有抓屏（`grab_game.py`、`watch_motion_fast.py`）
+  和模拟鼠标（`debug_drag.py`）的脚本 —— 明说是早期实验的残留，
+  **主程序一行都不调用，也不会被打包进 exe**。
+  藏着不说比写出来更糟。
+
+另外把 `DEVELOPMENT.md` 里那几条反复踩到的教训摘进了 README
+（`widgetAt` + `QTest.mouseClick` 测不出能不能点、顶层窗口的
+`WA_TransparentForMouseEvents` 是单向门、QSS `padding` 会吃掉
+小按钮的内容区、别拿 emoji 当图标）—— 那是这个项目最值钱的部分。
+
+
+
 
 
