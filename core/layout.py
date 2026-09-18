@@ -29,8 +29,12 @@ PAD_GRID: list[list[str]] = [
     ["5'", "6'", "7'", "1''"],       # 行 3（最上）
 ]
 
-# 每个键在简谱里的读法（界面显示用，跟 PAD_GRID 同构）
-PAD_LABELS: list[list[str]] = [list(row) for row in PAD_GRID]
+# ★ 游戏里每个键面上印的是 "PAD N"，不是简谱音名 ★
+#   浮窗上两个都标：音名（谱面用）+ PAD 号（游戏里对着找键用）。
+PAD_LABELS: list[list[str]] = [
+    ['PAD %d' % (r * PAD_COLS + c + 1) for c in range(PAD_COLS)]
+    for r in range(PAD_ROWS)
+]
 
 
 def pad_number(row: int, col: int) -> int:

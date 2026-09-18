@@ -1,19 +1,29 @@
 # -*- coding: utf-8 -*-
-"""谱面显示 —— 4×4 网格高亮式。
+"""谱面显示 —— 4×4 网格高亮式 + **向内收缩的节奏圆圈**。
 
-GridView  跟游戏里那台琴的排列一模一样；当前该打的键亮黄，
-          后面几个音按远近依次变淡（个数可调），底部再列一遍音名。
+GridView  跟游戏里那台琴的排列一模一样；当前该打的键深色打底，
+          后面几个音按远近依次变淡（个数可调）。
 
-（下落式 FallView 已经在 v1.1 砍掉：实战里 4×4 网格更好认。）
+★ v1.3：加了一层"向内收缩的圆圈" ★
+  用户：「改一下即将播放的按键提示，**一个圆圈向内聚集，聚集到中心的
+  点上就是点的时机**，这样子更明显，**点按俩次就是俩个圆圈**」。
+
+  每个还没到点的音，在它所在的格子上画一个**只描边、不填充**的亮黄
+  圆圈。半径随剩余时间线性收缩，缩到格子中心那一点的那一刻就是这个音
+  该按下的时刻。同一个键连按两下 → 两个同心圆：小的先到中心（先按），
+  大的后到（后按）。
+
+  （下落式 FallView 已经在 v1.1 砍掉：实战里 4×4 网格更好认。）
 """
 
 from __future__ import annotations
 
-import math
 import time
+from dataclasses import dataclass
 
-from PyQt6.QtCore import QRectF, Qt
-from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import (QBrush, QColor, QFont, QPainter, QPen, QPolygonF,
+                         QFont)
 from PyQt6.QtWidgets import QWidget
 
 from core import layout
@@ -22,13 +32,101 @@ from core.timeline import Timeline
 from . import theme as T
 
 
-def _pf(pitch: str) -> float:
-    """键名 -> 频率（判断"是不是同一个音高"用）。"""
-    from core.transcribe import pitch_freq
-    try:
-        return pitch_freq(pitch)
-    except Exception:
-        return 1.0
+# ----------------------------------------------------------------------
+# ★ 圆圈的时间与尺寸参数 ★
+# ----------------------------------------------------------------------
+
+# 圆圈从"最大"缩到中心那一点要多久（秒）。
+#
+# ★ 为什么是 1.2 秒 ★
+#   · 太短（0.6 秒）：圈几乎是从中心"蹦"出来的，根本来不及反应 ——
+#     你知道"要来了"的时候它已经到点了，等于没预告。
+#   · 太长（2.5 秒以上）：屏幕上会同时挂着五六个圈（`preview_count`
+#     默认 5），远远近近一大片，反而分不出**最近**的那个是哪一圈，
+#     而玩家真正要的恰恰是"下一个"。
+#
+#   1.2 秒 ≈ 120 BPM 下的两拍半。这个长度刚好罩住"接下来两三个音"
+#   （一般曲子一秒钟弹 2~4 个音），既看得清先后、又不至于糊成一片。
+#   实测手感：从圈出现到缩到中心，够你看一眼并抬手，不会手忙脚乱。
+LEAD = 1.2
+
+# 圆圈最大半径 = 格子边长 × 这个系数。
+#
+# ★ 0.45 —— 这里有个不能再大的硬约束 ★
+#   格子边长是 `cell`，圆心在格子中心，所以半径一超过 0.5 就**串到隔壁
+#   格子里去了**。0.5 看着还有余量，其实不是：
+#     · 当前格还要"微微放大" 5%（`inset = -cell * 0.05`），
+#       放大之后半格只剩 0.525，圆再粗一点就压线了；
+#     · 抗锯齿的描边宽度还得往外占 `RING_W_MAX_FRAC` 的一半。
+#   0.45 留出约 5% 的余量，粗圈也不会碰到格线。
+RING_MAX_FRAC = 0.45
+
+# 描边线宽：刚出现时最细、到点前最粗（按格子边长的比例算，
+# 这样浮窗拉大拉小视觉比例不变）。
+RING_W_MIN_FRAC = 0.020
+RING_W_MAX_FRAC = 0.060
+
+# 描边透明度：刚出现时最淡、到点前最亮。
+RING_A_MIN = 70
+RING_A_MAX = 255
+
+# 进度低于这个值时，在圆心补一个实心亮点。
+#
+# ★ 这个数被实测打过一次脸：原来取 0.34 ★
+#   0.34 意味着**还剩 0.41 秒**（0.34 × LEAD）时，中心就冒出亮点了。
+#   用户看到那颗点，以为"到了"，于是报：
+#   「圆圈圈到中心点的时机**有点提前了**」——
+#   提前量整整 0.4 秒，难怪感觉得出来。
+#
+#   现在 0.12：亮点只在**最后 0.14 秒**出现。它不再负责"预告还有多久"
+#   （那是圆环的活儿），只负责"就是现在"这最后一下。
+RING_DOT_AT = 0.12
+# 亮点半径 = 格子边长 × 这个系数。
+RING_DOT_FRAC = 0.085
+
+# ★ 「聚拢完成」比音开始晚多少秒 ★
+#
+#   用户实测：「圆圈圈到中心点的时机**有点提前了**」。
+#
+#   两个来源，都修了：
+#     ① 中心亮点出现得太早（见上面 `RING_DOT_AT`）—— 那是主因，0.4 秒；
+#     ② 圆环半径小到一定程度，**看起来**就是"到中心了"，
+#        而这时 `left` 还剩零点几秒。这是纯视觉的，改不掉 ——
+#        所以给一个**时间补偿**：让"聚拢完成"发生在音开始**之后**
+#        `RING_LAG` 秒，你在圈还在收的那一刻按下去，正好。
+#
+#   为什么宁晚勿早：早了你要等它（手上会迟疑），晚了它还在收你就按了
+#   （手上是连贯的）。节奏提示宁可"刚刚好偏晚一点点"。
+#
+#   觉得还提前就调大这个数，一个数管全部。
+RING_LAG = 0.10
+
+# ★ 音已经开始了，圆圈还要在中心留多久（秒）★
+#
+#   圆缩到中心 = "就是现在"。可 `set_time` 是 8 ms 一跳，而"刚好为 0"
+#   这一帧很可能被跨过去 —— 于是"到点了"的画面一帧都不显示。
+#   留一条 0.45 秒的尾巴，让中心那颗亮点**稳稳地亮一下**再消失，
+#   这才是用户要的"聚集到中心的点上就是点的时机"。
+#
+#   为什么不是留到整个音结束：谱子里全音符能响 2 秒，那颗点就会在
+#   中心杵 2 秒，看着像"卡住了"。0.45 秒够看清、又不拖泥带水。
+RING_TAIL = 0.45
+
+
+# ★ `_pf()` / `twins()` 在这里删掉了 ★
+#
+#   它们原来算的是"和它**同音高**的所有键"—— 也就是 `8` 和 `1'` 这一对，
+#   让浮窗把两个键**一起**点亮。理由很硬：这两个键的采样文件逐样本完全相同
+#   （`tools/cmp_twin.py` 实测：归一化后最大差 0.000000、频谱差 0.00 dB），
+#   从声音里**根本不存在**"玩家敲的是哪一个"这个信息，只能二选一猜。
+#
+#   但那是「听歌识谱」时代的东西 —— 那条路已经整条拆掉了。
+#   现在浮窗的闪烁只有一个来源：制谱器的打击垫（`control._on_pad_hit`），
+#   你点的是哪个格子、程序**当场就知道**，这条路上没有任何要猜的东西。
+#
+#   所以按用户的要求「完全按照琴谱」走：谱面/按键写 `8` 就只闪 `8`，
+#   写 `1'` 就只闪 `1'`，谁也不再牵连谁。
+
 
 
 class SheetView(QWidget):
@@ -42,7 +140,31 @@ class SheetView(QWidget):
         self.show_labels = True
         self.bg_scale = 1.0              # 底板浓度（1 = 原样，0 = 全透明）
         self.hidden = False              # 临时隐身：什么都不画
+        # ★ 透视贴合：已删除 ★
+        #   这里原来放着 `fit_quad` / `fit_us` / `fit_vs` 三份几何，
+        #   配合 `_fit_transform()` 把整块 4×4 网格按透视投到游戏里那台琴上。
+        #   用户后来决定整套拿掉（「自动贴合也删掉，可以调整大小和位置
+        #   就行了」），浮窗回到**固定摆放**：位置和大小由外面的
+        #   `x/y/w/h` 决定，绘制就是老老实实画在自己这块画布上。
+        #
+        # 要不要把「当前该打的音」**一直**涂成黄色。实时跟弹时关掉 ——
+        # 黄色（谱面提示）和青色（实际敲的键）混在一起会看不清；
+        # 但也不能一点反馈都没有，所以关掉之后改成「换音的那一下闪一下」。
+        #
+        # ★ v1.3 起，这个开关还管着**收缩圆圈画不画** ★
+        #   理由见 `_paint_rings()` 的注释：圆圈是亮黄的"该弹这里"，
+        #   跟弹模式下那份黄色得整个让给"你按了哪个键"的反馈层。
+        self.mark_current = True
+        self.mark_hold = 0.18            # 闪烁持续多久（秒）
+        # ★ 点格子出声（「可按」开关）★
+        #   默认关。它管的不只是"要不要响应" —— 浮窗整窗带
+        #   `WS_EX_TRANSPARENT`（鼠标完全穿透），事件压根到不了这里；
+        #   打开它会顺手把穿透取消（见 `control._set_pad_click`）。
+        self.pad_click = False
+        self._cur_stamp = 0.0            # 上一次「当前音换人」的时刻
         self.flash: dict[str, float] = {}   # 实时跟弹：音高 -> 到期时刻
+        self._flash_last: dict[str, float] = {}   # 每个键上次闪的时刻（防闪花眼）
+        self.max_flash = 4                # 同时最多亮几个格子
         self._last_key = None            # 上一帧的绘制内容指纹（用于省重绘）
         # ★ 这里**不要**再设 WA_TranslucentBackground ★
         #   父窗口（OverlayWindow）已经设过了，子控件再设一次会把自己
@@ -61,6 +183,8 @@ class SheetView(QWidget):
         self.sec = sec
         self.update()
 
+    # ---- ★ 透视贴合 ★ ----
+
     # ---- 工具 ----
 
     def _panel(self, p: QPainter):
@@ -74,6 +198,53 @@ class SheetView(QWidget):
         self.bg_scale = max(0.0, min(1.0, float(scale)))
         self._last_key = None
         self.update()
+
+    def set_mark_current(self, on: bool):
+        """要不要**一直**涂黄「当前该打的音」（实时跟弹时关掉）。
+
+        关掉之后当前格仍会闪一下（见 `current_blinking`），
+        只是不再长期占着黄色 —— 黄、青两块叠在一起根本分不清谁是谁。
+
+        v1.3 起它也控制收缩圆圈，理由同上：那层圆圈是黄色的。
+        """
+        self.mark_current = bool(on)
+        self._last_key = None
+        self.update()
+
+    def current_blinking(self) -> bool:
+        """当前格是不是**刚刚换过来** —— 那一下要闪。
+
+        ★ 为什么去掉了 `mark_current` 这个前提 ★
+
+          原来这里写的是 `if self.mark_current: return False` ——
+          也就是"当前格常亮着的时候就不闪了"。
+
+          可用户要的恰恰是两件事同时成立：
+
+              常亮（深色打底）= 「接下来该弹这个」
+              换音瞬间闪一下 = 「就是现在」
+
+          一个是底色、一个是节拍提示，本来就不冲突。
+          用户的原话：「按写好了的铺子判断，然后**正在播放的按键闪烁**」。
+
+        ★ 这一下是**纯谱面驱动**的，所以不可能有延迟 ★
+
+          `_cur_stamp` 在 `set_time()` 里更新，而 `set_time` 是由
+          播放时钟每 8 ms 喂进来的。也就是说"闪"发生在
+          **谱面时间跨过那个音的 `start_sec` 的那一刻** ——
+          中间没有音频、没有识别、没有等待。
+          （时钟到浮窗的实测延迟：0.0000 秒，见 `tools/diag_latency.py`。）
+
+          相比之下，之前那版是靠**听到声音**才闪（`_on_onset` → `flash_note`），
+          于是闪的动作背着整条音频链路的延迟 ——
+          用户看到的「闪烁的键落后两个」就是这么来的。
+
+        `has_flash()` 也用它来判断"还有没有东西要重绘"，所以这里必须
+        如实回答"现在到底闪不闪"。
+        """
+        if not self._cur_stamp:
+            return False
+        return (time.monotonic() - self._cur_stamp) <= self.mark_hold
 
     def set_hidden(self, on: bool):
         """什么都不画 —— 配合 WA_TranslucentBackground 就等于完全透明。
@@ -96,29 +267,59 @@ class SheetView(QWidget):
 
     # ---- 实时跟弹的高亮 ----
 
-    def set_flash(self, pitch: str, seconds: float = 0.35):
+    def set_flash(self, pitch: str, seconds: float = 0.35,
+                  min_gap: float = 0.45):
         """让某个键亮一下 —— 游戏里敲了哪个就亮哪个。
 
-        ★ 顺便把**同音高的另一个键**的残留高亮清掉 ★
-          `8` 和 `1'` 是同一个音高：上一个亮的是 `1'`、这次识别成 `8`，
-          两个格子会同时亮着，看着就像"按错了"。
+        ★ 同一个键 0.25 秒内重复触发会被忽略 ★
+          采样是 0.79 秒的衰减音，识别器在它衰减的过程中可能报好几次
+          （各次谐波衰减速度不同，激活会起伏），用户看到的就是
+          **「按一下，浮窗闪 2~3 下」**。
+          试过在识别器层面治（去抖窗口、峰值跟踪、能量上升门限…），
+          但那些手段**同时也会吃掉真正的快速连奏**（同一个键 0.27 秒后
+          再按一次）—— 两者在能量上是同一个现象，分不开。
+          所以放到这一层：识别器保持灵敏，浮窗只负责别闪花眼。
+
+        ★ 只闪这一个键 —— 不再"同音键一起亮" ★
+          以前 `8` 和 `1'` 会**一起**闪，因为那会儿闪烁来自**麦克风识别**：
+          这两个键的采样逐样本相同，从声音里判断不出敲的是哪一个，
+          只能两个都亮（用户按 `8` 却看到 `1'` 在闪，就是这么来的）。
+
+          现在闪烁由打击垫点击**直接驱动**，没有要猜的东西 ——
+          所以严格按谱面/按键走：写 `8` 就闪 `8`，写 `1'` 就闪 `1'`。
         """
         if not pitch:
             return
-        for other in list(self.flash):
-            if other != pitch and abs(1200.0 * math.log2(
-                    _pf(other) / _pf(pitch))) < 30.0:
-                del self.flash[other]
-        self.flash[pitch] = time.monotonic() + max(0.1, float(seconds))
+        now = time.monotonic()
+        if now - self._flash_last.get(pitch, 0.0) < min_gap:
+            return                       # 同一个键刚闪过，别闪第二下
+        self._flash_last[pitch] = now
+        self.flash[pitch] = now + max(0.1, float(seconds))
+        # ★ 同时高亮的格子数设个上限 ★
+        #   弹快的时候高亮会在屏幕上叠起来，看着就像「按一下亮了一堆」。
+        #   超过上限就把最早到期的几个踢掉 —— 反正它们也快灭了。
+        if len(self.flash) > self.max_flash:
+            for p, _e in sorted(self.flash.items(), key=lambda kv: kv[1]
+                                )[:len(self.flash) - self.max_flash]:
+                del self.flash[p]
         self._last_key = None
         self.update()
 
     def has_flash(self) -> bool:
+        """还有没有"音频触发的高亮 / 换音闪光"要画。
+
+        ★ 它**不**管收缩圆圈 ★
+          `overlay._on_flash_tick` 拿它决定那个 8 ms 的定时器要不要停。
+          圆圈的重绘由 `set_time()` 自己负责（播放时钟本来就在跑），
+          两边各管一段，互不干扰 —— 把圆圈也算进来的话，曲子一停、
+          圆圈还挂在屏幕上时，这个定时器会永远空转。
+        """
         now = time.monotonic()
         for p in list(self.flash):
             if self.flash[p] <= now:
                 del self.flash[p]
-        return bool(self.flash)
+        # 「当前格闪一下」也算：闪完得有人来把它擦掉
+        return bool(self.flash) or self.current_blinking()
 
     def clear_flash(self):
         self.flash.clear()
@@ -133,7 +334,13 @@ class SheetView(QWidget):
                    Qt.AlignmentFlag.AlignCenter, text)
 
     def _current_group(self) -> list[tuple[list[tuple[int, int]], bool, str]]:
-        """往后取 preview_count 个音符，转成 [(格子列表, 是否休止, 音名)]。"""
+        """往后取 preview_count 个音符，转成 [(格子列表, 是否休止, 音名)]。
+
+        ★ 这个三元组的形状**不许动** ★
+          `cell_orders()` / `repeat_run()` 和 `tests/test_views.py`
+          全靠它 unpack（`for cells, rest, name in group`）。
+          要时间的话走下面那个平行的 `_upcoming_timed()`。
+        """
         if not self.timeline or not self.timeline.items:
             return []
         out = []
@@ -147,105 +354,834 @@ class SheetView(QWidget):
                         '+'.join(item.chord.pitches)))
         return out
 
+    def _upcoming_timed(
+            self) -> list[tuple[list[tuple[int, int]], bool, str, float]]:
+        """和 `_current_group()` 同源，但**多带一个"这个音在第几秒"**。
+
+        ★ 为什么要另开一个方法，不把时间塞进 `_current_group()` ★
+          返回形状是别人依赖的契约（见 `_current_group()` 的注释），
+          塞个第四项进去 → 所有 `for cells, rest, name in group` 一起炸，
+          而其中一部分在测试里。与其改契约，不如**再开一条平行的**：
+          形状一样、只多一个字段，谁要时间谁来拿。
+        """
+        if not self.timeline or not self.timeline.items:
+            return []
+        out = []
+        for item in self.timeline.upcoming(self.sec, self.preview_count):
+            cells = []
+            for pitch in item.chord.pitches:
+                cell = layout.pitch_to_cell(pitch)
+                if cell is not None:
+                    cells.append(cell)
+            out.append((cells, item.chord.is_rest,
+                        '+'.join(item.chord.pitches), item.start_sec))
+        return out
+
+    # ---- 收缩圆圈的"还有东西要重绘吗" ----
+
+    def _rings_alive(self, timed=None) -> bool:
+        """屏幕上还有正在收缩（或刚缩完留了条尾巴）的圆圈吗。
+
+        `timed` 已经在手上的话传进来，省一次 `_upcoming_timed()` ——
+        `set_time()` 每 8 ms 就要问一次这个问题，别白算两遍。
+        """
+        if self.hidden:
+            return False                 # 不画 = 屏幕上什么都没有
+        if timed is None:
+            timed = self._upcoming_timed()
+        for _cells, rest, _name, start in timed:
+            if rest:
+                continue                 # 休止符没有格子可画
+            left = start - self.sec
+            if -RING_TAIL <= left <= LEAD:
+                return True
+        return False
+
+
+def repeat_run(group, start: int, cell) -> int:
+    """从 `group[start]` 起，这个格子**连着**出现几次。
+
+    ★ 「连按」是相邻重复，不是"总共出现几次" ★
+      用户：「如果是连续点俩下在 1 下面写一个 ×2」。
+      `5 5` → 要连按两下，返回 2。
+      `5 3 5` → 两次之间隔着个 3，不用连按，返回 **1**（不是 2）。
+      这个区别很重要：如果把"总共两次"当成"要连按"，
+      玩家会在中间那个 3 上被误导着多按一下。
+
+      和弦按"该键在不在这个音里"算 —— `5 5&3 5` 里 5 要按三下，
+      中间那下虽然和 3 一起响，但 5 确实还得按。
+
+      休止符会中断连续（那段是真的没声音）。
+    """
+    n = 0
+    for i in range(start, len(group)):
+        cells, rest, _name = group[i]
+        if rest or cell not in cells:
+            break
+        n += 1
+    return n
+
+
+def cell_orders(group) -> dict[tuple[int, int], list[int]]:
+    """预览里的音符 -> {格子: [它出现的**所有**次序]}。
+
+    ★ 为什么要收全部，不能用 `setdefault` 只留第一个 ★
+      用户报的：「同一个按键需要按下两次的时候显示不明显」。
+
+      原来这里是 `order.setdefault(cs, rank)` —— 同一个格子只记住
+      **最早**那次出现的序号。于是 `5 5`（同一个键连按两下）在浮窗上
+      只看到一个 `1`，**完全看不出还要再按一次**。
+      这台琴上"同一个键连着按"很常见（旋律里的重复音），
+      看不出来就会漏掉第二下。
+
+      现在返回的是列表：`{5 所在的格子: [0, 1]}` 表示
+      "现在按一下，下一个还要按同一个键"。
+
+    单独抽成纯函数是为了能测 —— 它原来是算在 `paintEvent` 里的，
+    而"画一遍再看像素"这种验证方式又脆又难写（见 `tests/test_views.py`）。
+    """
+    orders: dict[tuple[int, int], list[int]] = {}
+    for rank, (cells, _rest, _name) in enumerate(group):
+        for cs in cells:
+            orders.setdefault(cs, []).append(rank)
+    return orders
+
+
+@dataclass
+class _Frame:
+    """一帧要用到的**所有**几何量与数据。
+
+    ★ 为什么要把这些东西打包 ★
+      `paintEvent` 原来是一个 240 行的巨型方法，一半的代码都在重算
+      `ox / oy / cell` 那几个坐标。拆成小函数之后，它们总得拿到同一套
+      几何量 —— 要么一路当作参数传（七八个参数，签名长得没法看），
+      要么塞到 `self` 上（会跟"视图状态"混在一起，下次谁读到
+      `self.ox` 都不知道它是上一帧的残留还是真的配置）。
+      打包成这一只**只活一帧**的小盒子，两边都不占。
+    """
+
+    w: float
+    h: float
+    cell: float
+    # 网格外框的边长（4 格 + 3 个 `T.GAP`）。
+    #   （透视贴合删掉之前，用户拖的四个角对应的正是这块区域；
+    #    现在没有贴合了，它就是"网格自己那块正方形"的边长。）
+    side: float
+    ox: float
+    oy: float
+    # [(格子列表, 是否休止, 音名)] —— 形状跟 `_current_group()` 一致
+    group: list[tuple[list[tuple[int, int]], bool, str]]
+    # 同上，但多一个 start_sec（收缩圆圈要算"还剩多久"）
+    timed: list[tuple[list[tuple[int, int]], bool, str, float]]
+    orders: dict[tuple[int, int], list[int]]
+    blinking: bool                   # 谱面提示层整体开着吗
+    hot_flash: bool                  # 「就是现在」那一下还亮着吗
+    cur_cells: list[tuple[int, int]]
+
 
 class GridView(SheetView):
     """4×4 网格高亮式。"""
 
-    HEADER_H = 50
-    FOOTER_H = 40
+    # ★ 用户在浮窗上点了一个格子（参数是音名）★
+    #   浮窗平时是鼠标穿透的，这个信号发不出来 —— 只有「可按」打开
+    #   （`pad_click = True` + 窗口取消穿透）之后才有人点得到它。
+    pad_pressed = pyqtSignal(str)
+    # ★ 顶部那一行也去掉了（`HEADER_H` 恒为 0）★
+    #   这里原来画着「当前该打的音」一个大黄字（截图里那个 "5"，
+    #   休止时是"休止 0.5 秒"）。
+    #   用户：「这里不需要显示数字，直接把上面的搬到里面去就行」——
+    #   那个大字跟网格里的高亮说的是同一件事（当前格本身就是深橄榄色，
+    #   打下去再闪一下），属于重复；删掉之后它占的那 50 px 全给网格，
+    #   格子更大。
+    #   「上面的」= 曲名行，它现在紧贴在控制条下面（`OverlayWindow.lbl_song`）。
+    #   这个常量留着只为 `_frame()` 里那处加法不用改，**不是**还有抬头。
+    HEADER_H = 0
+    # ★ 「只当琴键用」——「可按」**单独**开着的时候 ★
+    #   用户连着报了两轮：
+    #     「可按的时候不要显示高亮」
+    #     「可按的时候高亮没有消失」
+    #   第一轮我理解成了"那颗按钮自己别高亮"，改错了方向（见
+    #   `DragHandle._build_bar` 里 `btn_tap` 那段）。真正说的是**这个**：
+    #   开着「可按」是要自己动手弹，屏幕上还留着"该打哪个键"的
+    #   亮格 + 收缩圆圈 + 序号小圆标，纯属干扰 —— 该收起来。
+    #
+    #   置真之后 `paintEvent` 只摆一副空键位（`_paint_blank_cells`），
+    #   画出来跟"还没载入谱面"一样干净，但 16 个格子照样在，
+    #   点下去照样出声。
+    #
+    #   ★ 「跟打」不算 ★
+    #     跟打就是照着谱面打，提示必须有 —— 所以这个标志由
+    #     `control._refresh_keys_only()` 拍板：**可按开着、而且跟打关着**
+    #     才置真。两个都开的时候提示还在（跟打优先）。
+    keys_only = False
+    # ★ 底部不再留文字带（`FOOTER_H` 恒为 0）★
+    #   用户：「这些没有用，只需要显眼的接下来打哪几个按键就行了」——
+    #   那行「下一个：1 → 5 → 5 → 6」跟网格里的淡黄预告格说的是同一件事，
+    #   删掉之后 40 px 全给网格，格子更大、更显眼。
+    #   这个常量留着只为布局算式里那一处加法不用改，**不是**还有文字带。
+    FOOTER_H = 0
     PAD = 12
 
-    def set_time(self, sec: float):
-        """这一帧画的东西没变就不重绘。
+    # ---- 重绘判断 ----
 
-        时钟跑到 ~120fps，但网格只在「当前音换人了」那一刻才真的变，
-        所以这里做个指纹比对：绝大多数 tick 是零开销的。
+    def set_time(self, sec: float):
+        """这一帧画的东西没变就不重绘 —— 但**正在收缩的圆圈一直在变**。
+
+        ★ 为什么原来那套"指纹比对"不够用了 ★
+          时钟跑到 ~120fps，网格只在「当前音换人了」那一刻才真的变，
+          所以原来这里做指纹比对、绝大多数 tick 零开销。
+          可 v1.3 加进来的圆圈**每一帧半径都不一样** —— 光靠指纹，
+          它会在第一次画出来之后冻在屏幕上，缩到一半就不动了。
+          （这就是加圆圈时最容易踩的坑：逻辑对了、画面是死的。）
+
+          所以判据变成两条，**任意一条成立就重绘**：
+            ① 内容指纹变了（换音了 → 顺便重新起算"闪一下"）
+            ② 屏幕上还有没缩完的圆圈（那就得每帧跟着变）
+          曲子停了、圈也走完了之后，`_rings_alive()` 变假、指纹也不变，
+          于是自动回到零开销 —— 该省的还是要省下来。
+
+        ★ 为什么只在这里判，不去动 `has_flash()` ★
+          `has_flash()` 是给 `overlay._on_flash_tick` 那个 8 ms 定时器
+          用的"要不要继续空转"。`set_time` 是播放时钟喂的，本来每 8 ms
+          就会来一次 —— 圆圈挂在这儿最自然，也不必再多起一个定时器。
         """
         self.sec = sec
+        timed = self._upcoming_timed()
         key = tuple((tuple(cells), rest, name)
-                    for cells, rest, name in self._current_group())
-        if key != self._last_key:
+                    for cells, rest, name, _t in timed)
+        changed = key != self._last_key
+        if changed:
+            self._cur_stamp = time.monotonic()       # 换音了 → 黄色重新闪一下
             self._last_key = key
+        if changed or self._rings_alive(timed):
             self.update()
 
+    # ---- 绘制 ----
+
     def paintEvent(self, _ev):
+        """只负责"画哪几层、什么顺序"，具体每一层各自成函数。
+
+        ★ 分层顺序是**试出来的**，不是随手排的 ★
+
+            格子底 → 两层整格反馈 → **收缩圆圈** → 音名文字
+            → 序号角标/`×N` → 底部红框
+
+          原先的写法是「格子（底 + 文字 + 角标）→ 闪光 → 圆圈」，
+          画出来一看有两个毛病（`_ring_probe.py` 的截图里一眼可见）：
+
+          ① **圆圈把音名划花了**
+             圆的半径从 0.45 格缩到 0，中间必然扫过格子正中的音名。
+             截图里 `5 5` 连按那两个同心圆正好叠在 "5" 字上，
+             字被两道黄线加一个亮点切得看不清。而"对着游戏找键"
+             全靠这行音名和下面的 "PAD N" —— 动效不能吃掉信息。
+             所以把圆圈挪到**文字下面**：圈照样看得见（它是细线，
+             从字旁边绕得过去），字始终是清清爽爽的一整块。
+
+          ② **角标被圆圈穿过**
+             圆最大时半径 0.45 格，而左上角那颗深色序号圈距格子中心
+             只有 0.38 格 —— 几何上**必然**相交。所以角标排在圆圈
+             之后画，让它压住圈。序号是"第几个弹"的信息，更重要。
+
+          两层整格反馈（`hot_flash` / `flash`）放在文字**之前**，
+          是因为它们原本就会盖住整格（连字一起罩）。现在文字挪到它们
+          之上后，"闪一下"的时候字反而看得更清楚了 —— 底色照亮，
+          但你还认得出是哪个音，这比原来更好。
+
+        ★ v1.5 加了「透视贴合」这一层，但**上面那个顺序一个都没动** ★
+          贴合做的事只有两件：把底板换成四边形、在画那八层之前
+          `setTransform()` 一下。也就是说 `_paint_rings` 之类压根不知道
+          自己在画一个梯形 —— 它们拿到的还是那个方方正正的 `_Frame`，
+          只是落在屏幕上的时候被投影了。
+          这样"网格变歪了、圆圈没跟着歪"这种**只有走一次变换才不会出**
+          的毛病，从结构上就不可能发生。
+        """
         if self.hidden:
             return                       # 不画 = 全透明（窗口还在，鼠标照样能抓）
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self._panel(p)
+
+        # ★ 「可按」单独开着：浮窗只当琴键用 ★
+        #   用户：「可按的时候不要显示高亮」（连着报了两轮）。
+        #   开「可按」是要自己动手弹，屏幕上再留着"该打哪个键"的高亮格、
+        #   收缩圆圈、序号小圆标，纯属干扰 —— 全收起来，只留 16 个空键位。
+        #   （标志由 `control._refresh_keys_only()` 拍板：可按开着**而且**
+        #     跟打关着才置真 —— 跟打必须看提示。）
+        #   放在最前面：有谱面 / 没谱面 / 演奏结束，三种情况一视同仁。
+        if self.keys_only:
+            self._panel(p)
+            self._paint_blank_cells(p)
+            return
 
         if not self.timeline or not self.timeline.items:
+            self._panel(p)
+            # ★ 「可按」打开时把格子也摆出来 ★
+            #   不然屏幕上只有一行"还没有谱子"，用户想点都没地方点
+            #   （"点了没反应"的一种就是这么来的）。
+            if self.pad_click:
+                self._paint_blank_cells(p)
             self._hint(p, '还没有谱子')
             return
 
-        w, h = self.width(), self.height()
-        group = self._current_group()
-        if not group:
+        f = self._frame()
+        if f is None:
+            self._panel(p)
+            if self.pad_click:
+                self._paint_blank_cells(p)
             self._hint(p, '演奏结束')
             return
 
-        cur_cells, cur_rest, cur_name = group[0]
+        # ★ 底板先画 ★
+        #   就是"窗口那么大"的那个圆角矩形 —— 浮窗固定摆放，画满自己这块。
+        self._panel(p)
+        # （原来这里还有一行 `self._paint_title(p, f)`：网格上方一个
+        #   黄字大标题，写着"当前该打的音"。用户：「这里不需要显示数字，
+        #   直接把上面的搬到里面去就行」—— 它跟网格里的高亮是同一件事，
+        #   删掉之后那 50 px 全给网格。见类头的 `HEADER_H`。）
+        self._paint_cells(p, f)
+        self._paint_hot_flash(p, f)
+        self._paint_flash(p, f)
+        self._paint_rings(p, f)
+        self._paint_labels(p, f)
+        self._paint_badges(p, f)
+        self._paint_unmapped_hint(p, f)
 
-        # ---- 顶部：当前该打的音 ----
-        label = ('休止 %s 拍' % _fmt(self.timeline.item_at(self.sec).chord.duration)
-                 if cur_rest else (cur_name or '—'))
-        p.setPen(QPen(T.ACTIVE if not cur_rest else T.TEXT_DIM))
-        f = QFont()
-        f.setPointSizeF(min(30.0, h * 0.075))
-        f.setBold(True)
-        p.setFont(f)
-        p.drawText(QRectF(self.PAD, 4, w - 2 * self.PAD, self.HEADER_H - 6),
-                   Qt.AlignmentFlag.AlignCenter, label)
+    def _frame(self) -> _Frame | None:
+        """把这一帧的几何量和数据算齐（拆出来的各个 `_paint_*` 都吃它）。"""
+        if not self.timeline or not self.timeline.items:
+            return None
+        group = self._current_group()
+        if not group:
+            return None
 
-        # ---- 中间：4×4 网格 ----
-        top = self.HEADER_H
+        w, h = self.width(), self.height()
         avail_w = w - 2 * self.PAD
         avail_h = h - self.HEADER_H - self.FOOTER_H
         side = min(avail_w, avail_h)
         cell = (side - 3 * T.GAP) / 4.0
         ox = (w - side) / 2.0
-        oy = top + (avail_h - side) / 2.0
+        oy = self.HEADER_H + (avail_h - side) / 2.0
 
-        # 每个格子 -> 它在预览里的序号（0 = 当前）
-        order: dict[tuple[int, int], int] = {}
-        for rank, (cells, _rest, _name) in enumerate(group):
-            for cs in cells:
-                order.setdefault(cs, rank)
+        cur_cells, _cur_rest, _cur_name = group[0]
+        # 「换音那一下」的闪光 —— 纯谱面驱动，见 `current_blinking()`
+        hot_flash = self.current_blinking()
+        # 常亮（该弹这个）和闪一下（就是现在）**不冲突**，两个都要显示
+        blinking = self.mark_current or hot_flash
+        return _Frame(
+            w=w, h=h, cell=cell, side=side, ox=ox, oy=oy,
+            group=group, timed=self._upcoming_timed(),
+            # 每个格子 -> 它在预览里的**所有**序号（0 = 当前）
+            # （细节见 `cell_orders()` 的注释 —— 这里踩过"连按同一个键
+            #   看不出来"的坑）
+            orders=cell_orders(group),
+            blinking=blinking, hot_flash=hot_flash, cur_cells=cur_cells,
+        )
 
+    def _cell_rect(self, f: _Frame, row: int, col: int,
+                   inset: float = 0.0) -> QRectF:
+        """格子坐标 -> 屏幕矩形。**行 3 画在最上面**（跟游戏画面一致）。
+
+        `inset` 为正 = 往内缩，为负 = 放大（当前格那点"微微放大"就是
+        传了个负数进来）。
+
+        ★ 老老实实四等分 ★
+          这里原来读的是 `f.us` / `f.vs`（透视贴合时的"内部分格线"，
+          用来把每一格单独对到游戏里某个键上）。贴合整套删掉之后，
+          浮窗是固定摆放，格子就该是**等分**的 —— 那是它自己的排版，
+          跟游戏里的琴没有关系。
+        """
+        x = f.ox + col * (f.cell + T.GAP)
+        y = f.oy + (3 - row) * (f.cell + T.GAP)
+        r = QRectF(x, y, f.cell, f.cell)
+        if inset:
+            r = r.adjusted(inset, inset, -inset, -inset)
+        return r
+
+    # -- ★ 「可按」：点格子出声 ★ --
+
+    def _geom(self) -> tuple[float, float, float]:
+        """网格几何 `(ox, oy, cell)` —— **只看窗口大小，不看有没有谱面**。
+
+        ★ 为什么单开一份 ★
+          `_frame()` 在"还没载入谱面"和"曲子播完了"这两种情况下返回
+          `None`（画画那条路那样处理是对的：没内容就不画）。
+          可**点格子**不该跟着失效 —— 格子还在屏幕上，点下去就该响。
+          所以这里把 `_frame()` 里那段几何算式抄一份，去掉 timeline 那层。
+          （哪天那边的排版改了，这两处得一起改。）
+        """
+        w, h = self.width(), self.height()
+        avail_w = w - 2 * self.PAD
+        avail_h = h - self.HEADER_H - self.FOOTER_H
+        side = min(avail_w, avail_h)
+        cell = (side - 3 * T.GAP) / 4.0
+        ox = (w - side) / 2.0
+        oy = self.HEADER_H + (avail_h - side) / 2.0
+        return ox, oy, cell
+
+    def _cell_at(self, pos) -> tuple[int, int] | None:
+        """屏幕坐标 -> (行, 列)；没落在任何格子上就是 `None`。
+
+        ★ 用 `_geom()` 而不是 `_frame()` ★
+          见上面那段："点得到"这件事不该被"有没有谱面"绑住。
+        """
+        ox, oy, cell = self._geom()
         for row in range(4):
             for col in range(4):
-                # 行 3 画在最上面（跟游戏画面一致）
-                y = oy + (3 - row) * (cell + T.GAP)
-                x = ox + col * (cell + T.GAP)
-                rect = QRectF(x, y, cell, cell)
+                r = QRectF(ox + col * (cell + T.GAP),
+                           oy + (3 - row) * (cell + T.GAP), cell, cell)
+                if r.contains(pos):
+                    return row, col
+        return None
 
-                rank = order.get((row, col))
-                if rank is None:
-                    fill, edge, txt = T.CELL, T.CELL_EDGE, T.TEXT_DIM
-                    inset = 0.0
-                elif rank == 0:
-                    fill, edge, txt = T.ACTIVE, T.ACTIVE_EDGE, T.ACTIVE_TEXT
-                    inset = -cell * 0.05          # 当前格微微放大
-                else:
-                    idx = min(rank - 1, len(T.UPCOMING) - 1)
-                    fill = T.UPCOMING[idx]
-                    edge = T.UPCOMING[idx].lighter(125)
-                    txt = T.ACTIVE_TEXT
-                    inset = 0.0
+    def _paint_blank_cells(self, p: QPainter):
+        """摆一副"全空闲"的格子（没谱面 / 演奏结束时用）。
 
-                r = rect.adjusted(inset, inset, -inset, -inset)
-                p.setPen(QPen(self._dim(edge), 3 if rank == 0 else 1.5))
+        ★ 只给「可按」用 ★
+          平时的空状态就是一块板 + 一行提示（干净）。
+          可「可按」打开时用户是要**点着弹**的 —— 格子不画出来，
+          他连往哪儿点都不知道（这也是"点了没反应"的一种：
+          屏幕上根本没格子）。
+        """
+        ox, oy, cell = self._geom()
+        for row in range(4):
+            for col in range(4):
+                r = QRectF(ox + col * (cell + T.GAP),
+                           oy + (3 - row) * (cell + T.GAP), cell, cell)
+                p.setPen(QPen(T.CELL_EDGE, 1.6))
+                p.setBrush(QBrush(T.CELL))
+                p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
+                if not self.show_labels:
+                    continue
+                p.setPen(QPen(T.TEXT))
+                font = QFont()
+                font.setPointSizeF(max(10.0, r.width() * 0.26))
+                p.setFont(font)
+                p.drawText(r, Qt.AlignmentFlag.AlignCenter,
+                           layout.PAD_GRID[row][col])
+
+    def mousePressEvent(self, event):
+        """「可按」打开时，点哪个格子就出哪个音。
+
+        ★ 平时根本走不到这儿 ★
+          浮窗整窗带 `WS_EX_TRANSPARENT`（鼠标完全穿透 —— 枪的准星
+          要能直接打过去），事件进不了浮窗里的任何控件。只有控制台
+          把穿透取消（「可按」或「跟打」打开时）之后这条路才通，
+          所以这里没有"该不该响应"的花样，`pad_click` 就是那个开关。
+        """
+        if not self.pad_click or event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        hit = self._cell_at(event.position())
+        if hit is None:
+            super().mousePressEvent(event)
+            return
+        row, col = hit
+        self.pad_pressed.emit(layout.PAD_GRID[row][col])
+        event.accept()
+
+    # -- ★ 顶部大字：已删除 ★ --
+    #
+    #   这里原来有个 `_paint_title()`：在网格上方画一个黄字大标题，
+    #   内容是"当前该打的音"（`5`），休止时是"休止 0.50 秒"。
+    #
+    #   ★ 用户：「这里不需要显示数字，直接把上面的搬到里面去就行」★
+    #     它跟网格里的高亮说的是同一件事 —— 当前格本身就是深橄榄色
+    #     （`theme.ACTIVE`），打下去再闪一下（`theme.PRESS`）。
+    #     删掉之后 `HEADER_H` 归零，那 50 px 全给了网格，格子更大。
+    #
+    #   连带一起去掉的还有「休止 X 秒」那行提示：休止期间网格里没有
+    #   该亮的格子，本来靠它告诉你要等多久 —— 现在这个信息没有了。
+    #   真要找回来的话，画的地方得换个位置（比如网格正中间盖一层），
+    #   不能再占顶部一整条。
+
+    # -- 4×4 网格 --
+
+    def _cell_style(self, f: _Frame, rank, cell=None):
+        """一个格子该用什么底色 / 边色 / 字色 / 放大值。
+
+        抽出来是因为 `_paint_cells` 和 `_paint_labels` 都要问同一件事，
+        而它们现在是**两次独立的循环**（中间隔着收缩圆圈那一层）——
+        两边各抄一份判断迟早会抄歪。
+
+        `cell` 是格子的 `(row, col)`，只有判断"当前格是不是连按的开头"
+        时才需要 —— 见下面那段。
+        """
+        if rank is None or not f.blinking:
+            # ★ 实时跟弹时，后面几个音的「淡黄预告格」也要一起关掉 ★
+            #   只关当前格是不够的：预告格本身是淡黄 (255,238,158)，
+            #   五个格子扑在屏幕上就是一片黄 —— 看着像"黄色残留"，
+            #   实际是你还没弹到的音。跟弹要看的是"我刚敲了哪个键"。
+            return T.CELL, T.CELL_EDGE, T.TEXT_DIM, 0.0
+        if rank == 0:
+            # ★★ 连按中的当前格**不要**变成深色 ★★
+            #
+            #   用户：「连续弹俩下的**不应该立马变色**，有点不好认」，
+            #   紧接着补一句「**如果连续弹3下的也是**」。
+            #
+            #   深色这个外观本来是在说"这个键弹一下就过去了"。
+            #   可连按的时候，同一个格子**既要"现在弹"、又要"还要再弹 N 下"** ——
+            #   一抹成深色，后面那半句就没了：
+            #     · 当前格按规矩**不显示序号**（那块深色本身就是"就是它"）
+            #     · `×N` 只缩在左上角一小块
+            #   于是 `5 5` 看起来就跟一个普通的单音一模一样，认不出还要再来一下。
+            #
+            #   所以连按开头的那个格子**保留预告的淡黄底**，换成醒目的亮黄粗边：
+            #   一眼就知道"这个键还没弹完"，同时它仍然是"现在该弹的那个"
+            #   （圆圈照样在它上面收缩）。
+            #
+            #   单音不受影响：只有 `repeat_run ≥ 2`（后面还紧跟着同一个键）
+            #   才走这一支。
+            if (cell is not None
+                    and repeat_run(f.group, 0, cell) >= 2):
+                return (T.UPCOMING[0], T.PRESS, T.ACTIVE_TEXT,
+                        -f.cell * 0.05)          # 仍然微微放大
+            return (T.ACTIVE, T.ACTIVE_EDGE, T.ACTIVE_TEXT,
+                    -f.cell * 0.05)              # 当前格微微放大
+        idx = min(rank - 1, len(T.UPCOMING) - 1)
+        return (T.UPCOMING[idx], T.UPCOMING[idx].lighter(125),
+                T.ACTIVE_TEXT, 0.0)
+
+    def _paint_cells(self, p: QPainter, f: _Frame):
+        """格子的底色和边 —— 只有这两样，文字在 `_paint_labels` 里另画。"""
+        for row in range(4):
+            for col in range(4):
+                ranks = f.orders.get((row, col)) or []
+                rank = ranks[0] if ranks else None
+                fill, edge, _txt, inset = self._cell_style(f, rank,
+                                                           (row, col))
+                hot = rank == 0 and f.blinking
+                r = self._cell_rect(f, row, col, inset)
+                p.setPen(QPen(self._dim(edge), 3 if hot else 1.5))
                 p.setBrush(QBrush(self._dim(fill)))
                 p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
 
-                if self.show_labels:
-                    p.setPen(QPen(txt))
-                    p.setFont(_fit_font(cell * 0.34, bold=(rank == 0)))
-                    p.drawText(r, Qt.AlignmentFlag.AlignCenter,
-                               layout.cell_to_pitch(row, col))
+    def _paint_labels(self, p: QPainter, f: _Frame):
+        """格子里的两行字：上行音名、下行游戏键面印的 "PAD N"。
 
-        # ---- 实时跟弹：刚听到的键，盖一层亮青 ----
+        ★ 为什么它排在收缩圆圈**之后** ★
+          圆的半径从 0.45 格一路缩到 0，中途必然扫过格子正中 ——
+          也就是音名所在的地方。曾经把圈画在文字之上，截图里
+          `5 5` 的那两个同心圆正好叠在 "5" 上，字被切得看不清。
+          而"对着游戏找哪个键"全靠这两行字，动效不能吃掉信息。
+          挪到文字之下后，圈从字的旁边绕过去，两边都清楚。
+        """
+        if not self.show_labels:
+            return
+        for row in range(4):
+            for col in range(4):
+                ranks = f.orders.get((row, col)) or []
+                rank = ranks[0] if ranks else None
+                _fill, _edge, txt, inset = self._cell_style(f, rank,
+                                                            (row, col))
+                hot = rank == 0 and f.blinking
+                r = self._cell_rect(f, row, col, inset)
+                p.setPen(QPen(txt))
+                # 两行：上行是音名（谱面用的），下行是游戏键面上印的
+                # "PAD N"（对着游戏找键用的）—— 光有音名你对不上键，
+                # 光有 PAD 号又对不上谱面，所以两个都标。
+                p.setFont(_fit_font(f.cell * 0.32, bold=hot))
+                p.drawText(QRectF(r.x(), r.y() + r.height() * 0.05,
+                                  r.width(), r.height() * 0.50),
+                           Qt.AlignmentFlag.AlignCenter,
+                           layout.cell_to_pitch(row, col))
+                p.setFont(_fit_font(f.cell * 0.185))
+                p.drawText(QRectF(r.x(), r.y() + r.height() * 0.57,
+                                  r.width(), r.height() * 0.36),
+                           Qt.AlignmentFlag.AlignCenter,
+                           layout.PAD_LABELS[row][col])
+
+    # -- ★ 向内收缩的圆圈 ★ --
+
+    def _paint_rings(self, p: QPainter, f: _Frame):
+        """★ 用户要的"一个圆圈向内聚集，聚集到中心的点上就是点的时机" ★
+
+        ★ 半径公式：`r = R_MAX × (离这个音还有多久 / LEAD)` ★
+          对**时间**严格线性 —— 不做任何缓动。
+          缓动（比如越到后面缩得越快）看着是更"有劲"，但它会让
+          "还剩多久"这件事**读不出来**：你会以为圈还挺大、其实只剩
+          一点点时间了。这个圆圈的全部价值就是让人一眼估出剩余时间，
+          所以宁可朴素。刚出现时最大、到点缩成中心一点，跟用户描述的
+          一模一样。
+
+        ★ 为什么是"还没开始的音"都画，而不是只画第一个预告 ★
+          用户：「**点按俩次就是俩个圆圈**」。
+          `5 5`（相隔 0.4 秒）在第一个音还没到点之前，两个音都属于
+          "还没开始"——它们的 `left` 分别是 0.8 秒和 1.2 秒，
+          代进公式就是一大一小两个同心圆：**小的先到中心（先按）、
+          大的后到（后按）**，正好是用户要的那个效果。
+          如果按"只画下一个"来写，就只剩一个圈，连按看不出来。
+
+        ★ 什么时候不画 ★
+          `blinking` 为假 = 实时跟弹模式。那一屏的黄色要整个让给
+          "你按了哪个键"的反馈层（`self.flash`），再多一层亮黄圆圈，
+          玩家就分不清哪块黄是"该弹"、哪块是"已弹"了。
+          这跟 `_cell_style()` 里关掉预告格是**同一个取舍** ——
+          那个开关管着三样东西：预告格、当前格常亮、收缩圆圈，
+          它们本来就是同一层"谱面提示"。
+
+        ★ 为什么只描边不填充 ★
+          格子的底色本身就是一条信息："第几个弹"靠渐淡黄来区分
+          （`T.UPCOMING` 从亮到暗）。填充会把它整块盖掉 —— 尤其
+          `5 5 5` 这种同一个格子上叠着三个圈的时候，填出来就是
+          一个实心大色块，连"这是第几个预告格"都读不出来了。
+          描边还有个好处：半径在变，圈的轮廓跟着变，"在缩"这件事
+          一眼就能看出来；实心块的大小变化反而没那么显眼。
+
+          至于"填充会压住音名"—— 那条顾虑现在是靠**层次**解决的
+          （圈在文字下面，见 `paintEvent`），不是靠不填充。
+        """
+        if not f.blinking:
+            return
+        if f.cell <= 10.0:
+            # 格子小到这个地步，圆圈和格子里的字会糊成一团；宁可不画，
+            # 也别把"该弹哪个键"这个更基本的信息搅浑。
+            return
+
+        items = []
+        for _cells, rest, _name, start in f.timed:
+            if rest:
+                continue
+            left = start - self.sec
+            if left > LEAD or left < -RING_TAIL:
+                continue
+            items.append((left, _cells))
+        # 远的先画、近的后画：连按时小圈压在大圈上，层次一眼分得开。
+        # （试过按音高排、按格子排，都不如按"还剩多久"排 —— 它本身就是
+        #   "先后"这个词的定义。）
+        items.sort(key=lambda kv: -kv[0])
+
+        for left, cells in items:
+            # 进度：1 = 刚出现（最大），0 = 聚拢完成
+            # ★ `+ RING_LAG` 就是那个"宁晚勿早"的补偿，见它的注释 ★
+            prog = max(0.0, min(1.0, (left + RING_LAG) / LEAD))
+            # 越接近中心越亮、越粗 —— "快了"要一眼看得出来。
+            # （亮度用 alpha 而不是换个更亮的颜色：`T.PRESS` 那个亮黄在
+            #   深色底上已经是最跳的了，再亮就发白、跟淡黄预告格撞色。）
+            near = 1.0 - prog
+            wide = f.cell * (RING_W_MIN_FRAC
+                             + (RING_W_MAX_FRAC - RING_W_MIN_FRAC) * near)
+            alpha = int(RING_A_MIN + (RING_A_MAX - RING_A_MIN) * near)
+            # ★ 让**内边缘**缩到中心，而不是圆心 ★
+            #   直接线性缩到 0 的话，半径只剩几个像素时**看起来**就已经
+            #   "到中心了"，而那会儿 `left` 还剩零点几秒 —— 这是用户感觉
+            #   "提前"的第二个来源。让内径（radius − 半个线宽）收到 0，
+            #   视觉上的"聚拢完成"就和 `prog == 0` 对齐了。
+            r_in = wide * 0.5
+            radius = r_in + (f.cell * RING_MAX_FRAC - r_in) * prog
+            for (row, col) in cells:
+                r = self._cell_rect(f, row, col)
+                c = r.center()
+                # ★ 垫不垫暗衬，取决于这格现在是深底还是浅底 ★
+                #   这一条是**对着截图来回改出来的**，不是拍脑袋：
+                #     · 预告格是淡黄 (255,238,158)，亮黄圈直接画上去对比度
+                #       极低 —— 整张图缩着看几乎找不到圈在哪儿，而"更明显"
+                #       正是这次改动的全部目的；
+                #     · 当前格是深橄榄 (96,108,74)，底色本来就压得住亮黄，
+                #       再垫一层暗衬反而把那颗"就是现在"的亮点从亮黄
+                #       (255,214,74) 压成暗金黄 (~214,183,68)，丢了冲劲。
+                #   所以按实际底色分流，而不是一刀切地都垫。
+                ranks = f.orders.get((row, col)) or []
+                _fill, _edge, _txt, _inset = self._cell_style(
+                    f, ranks[0] if ranks else None, (row, col))
+                light_bg = _fill.lightness() >= 128
+
+                if radius > 0.6:
+                    ring = QRectF(c.x() - radius, c.y() - radius,
+                                  radius * 2.0, radius * 2.0)
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    if light_bg:
+                        # 先垫一圈更粗的深色，再画亮黄。
+                        # （试过换个更亮的颜色、单纯加大线宽，都不行：
+                        #   底色本身就那么亮，亮色的天花板就那么高，
+                        #   只能靠明暗对比来把轮廓拉出来。）
+                        p.setPen(QPen(self._dim(
+                            QColor(26, 20, 4, int(alpha * 0.72))),
+                            wide + f.cell * 0.024))
+                        p.drawEllipse(ring)
+                    p.setPen(QPen(self._dim(
+                        QColor(T.PRESS.red(), T.PRESS.green(),
+                               T.PRESS.blue(), alpha)), wide))
+                    p.drawEllipse(ring)
+                # ★ 缩得很小的时候，在中心补一个实心亮点 ★
+                #   光靠一圈细线，"就是现在"那一下反而最不明显 ——
+                #   圆越小，周长越短，一眼扫过去很容易漏掉。
+                #   补个点之后，"到点了"从"一个圈"变成"一颗灯"，
+                #   眼睛能直接抓住。它也是上面 `RING_TAIL` 那条尾巴的
+                #   主角：圈缩完之后，这颗点还要在中心稳稳亮 0.45 秒。
+                if prog >= RING_DOT_AT:
+                    continue
+                dot = f.cell * RING_DOT_FRAC * (1.0 - 0.45 * prog / RING_DOT_AT)
+                # 亮点比圆环更亮、更实（+165 而不是 +130）——
+                # 它是这条提示线的**终点**，得是整屏最跳的那一点。
+                dot_a = int(RING_A_MIN + 165 * (1.0 - prog / RING_DOT_AT))
+                p.setPen(Qt.PenStyle.NoPen)
+                if light_bg:
+                    halo = dot + f.cell * 0.013
+                    p.setBrush(QBrush(self._dim(
+                        QColor(26, 20, 4, int(dot_a * 0.72)))))
+                    p.drawEllipse(QRectF(c.x() - halo, c.y() - halo,
+                                         halo * 2.0, halo * 2.0))
+                p.setBrush(QBrush(self._dim(
+                    QColor(T.PRESS.red(), T.PRESS.green(), T.PRESS.blue(),
+                           dot_a))))
+                p.drawEllipse(QRectF(c.x() - dot, c.y() - dot,
+                                     dot * 2.0, dot * 2.0))
+
+    # -- 序号角标 + `×N` --
+
+    def _paint_badges(self, p: QPainter, f: _Frame):
+        """序号角标与连按标 —— **画在圆圈之上**（理由见 `paintEvent`）。
+
+        ★ 序号角标 ★（用户定的显示方案）
+            · 当前按的键 **不显示数字** —— 它就是那块深色 + 放大
+            · 下一个按的显示 `1`，**圆圈**里
+            · 如果这个键要**连着按两下**，在 `1` **下面**写 `×2`
+            · 那个音弹过去之后 `×2` 自然消失 ——
+              因为它变成"当前格"了，而当前格不标任何东西
+        """
+        if not f.blinking:
+            return
+        for row in range(4):
+            for col in range(4):
+                ranks = f.orders.get((row, col)) or []
+                if not ranks:
+                    continue
+                # 同一个格子可能出现好几次，角标只写**第一次**那个序号 ——
+                # 圆圈只管一件事："这个键该在第几个音弹"。
+                # 要连按的话下面另有 `×N`（那才是"还要按几下"）。
+                rank = ranks[0]
+                r = self._cell_rect(f, row, col,
+                                    -f.cell * 0.05 if rank == 0 else 0.0)
+
+                if rank == 0:
+                    # ★ 连按同一个键时，`×N` 只能标在当前格上 ★
+                    #   用户要的"下一个显示 1、1 下面写 ×2"，
+                    #   前提是"下一个"是**另一个键**。
+                    #   可 `5 5`（连按）时"下一个"就是当前这个键 ——
+                    #   没有第二个格子可以挂 `1`，`×2` 也没地方写。
+                    #   这时把 `×N` 直接标在当前格左上角（就是序号
+                    #   圆圈那个位置）：数字仍然不显示（符合要求），
+                    #   但"要连按"看得出来。
+                    #
+                    # ★ 数的是"**还要**按几下"，**不含当前这一次** ★
+                    #   用户：「在切换到需要点俩下的按键上已经点一下了
+                    #   就要把 ×2 去掉」——
+                    #   当前这个音**正在按**，所以它不该算进"还要按几下"。
+                    #
+                    #     `5 5`   → 还要 1 下 → 标 `×1`
+                    #     `5 5 5` → 还要 2 下 → 标 `×2`
+                    #
+                    #   这跟"下一个格"上用 `repeat_run(group, 1, …)`
+                    #   是**同一个语义**：`×N` = 从这个标记所在的音起，
+                    #   还要按 N 下。
+                    #
+                    # ★ 门槛从 `>= 2` 改成了 `>= 1` ★
+                    #   用户后来实测报：「连续弹俩下的不应该立马变色，
+                    #   **有点不好认**」，还补了一句「**如果连续弹3下的也是**」。
+                    #
+                    #   原来 `5 5` 时 `run_here == 1` 就不标了 ——
+                    #   而当前格**按规矩不显示序号**，于是那一格看起来
+                    #   跟一个普通单音一模一样，根本认不出还要再来一下。
+                    #   现在 `5 5` 也标 `×1`（读作"还要按 1 下"）：
+                    #   语义没变，只是补上了原先漏掉的那一档。
+                    #
+                    #   （"连按中不变深色"那条在 `_cell_style()` 里，
+                    #     两处合起来才够用：**底色**说"还没弹完"，
+                    #     `×N` 说"还差几下"。）
+                    run_here = repeat_run(f.group, 0, (row, col)) - 1
+                    if run_here >= 1:
+                        _paint_run(p, r.x() + r.width() * 0.05,
+                                   r.y() + r.height() * 0.05,
+                                   min(r.width() * 0.42, 52.0),
+                                   min(r.height() * 0.24, 22.0), run_here)
+                    continue
+
+                badge = min(f.cell * 0.36, 28.0)
+                bx = r.x() + max(3.0, f.cell * 0.05)
+                by = r.y() + max(3.0, f.cell * 0.05)
+                bcircle = QRectF(bx, by, badge, badge)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(QColor(20, 26, 40, 235)))
+                p.drawEllipse(bcircle)
+                # 序号圆圈里的字：`1`（最近那个）用亮黄，
+                # 后面的用白 —— 这里不能用 `T.ACTIVE`，
+                # 它是深色，画在深色圆圈上等于看不见
+                p.setPen(QPen(T.PRESS if rank == 1
+                              else QColor(228, 234, 248)))
+                # ★ 圆圈里**只放一个数字** ★
+                #   用户看到 `2·3` 的反应是「这个 2*3 又是什么」
+                #   —— 看不懂就是设计问题。
+                #   那个写法是我为了标"隔开的重复"（同一个键在第 2、3
+                #   个音各来一次）加的，但它把两个数字塞进一个圈里，
+                #   圆圈就不再是"第几个弹"了。
+                #   现在圆圈只管一件事：**这个键该在第几个音弹**。
+                p.setFont(_fit_font(badge * 0.60, bold=True))
+                p.drawText(bcircle, Qt.AlignmentFlag.AlignCenter, str(rank))
+
+                # ★ 连按提示：写在 `1` 的**下面** ★
+                if rank != 1:
+                    continue
+                # 从"下一个音"起，这个格子连着出现几次（给"下一个"用）
+                run_next = (repeat_run(f.group, 1, (row, col))
+                            if len(f.group) > 1 else 0)
+                if run_next < 2:
+                    continue
+                # ★ 这里的中间量别叫 `w` / `h` ★
+                #   `w`/`h` 在这个类里一直是"窗口宽高"的意思，
+                #   借来当徽章尺寸的话，改代码的人会以为自己在动窗口。
+                bw = bcircle.width() * 1.20
+                bh = bcircle.height() * 0.70
+                _paint_run(p, bcircle.center().x() - bw / 2.0,
+                           bcircle.bottom() + bh * 0.16, bw, bh, run_next)
+
+    # -- 两层闪光 --
+
+    def _paint_hot_flash(self, p: QPainter, f: _Frame):
+        """「换音那一下」的闪光 ★ 用户要的"正在播放的按键闪烁" ★
+
+        纯谱面驱动：`sec` 跨过某个音的 `start_sec` 就闪它一下，
+        中间不经过音频、不经过识别 —— 所以它闪的时刻就是谱面的时刻，
+        不可能背着音频链路的延迟（时钟到浮窗实测 0.0000 秒）。
+
+        和下面那层「按下去闪一下」的区别：
+          这一层 = 谱面走到这儿了（**正在播放/该弹的**）
+          下面那层 = 程序听到你敲了（音频触发，跟手模式用）
+        """
+        if not (f.hot_flash and f.cur_cells):
+            return
+        k = 1.0 - min(1.0, (time.monotonic() - self._cur_stamp)
+                      / max(1e-6, self.mark_hold))
+        p.setPen(QPen(QColor(T.PRESS.red(), T.PRESS.green(), T.PRESS.blue(),
+                             int(40 + 215 * k)), 5.0))
+        p.setBrush(QBrush(QColor(T.PRESS.red(), T.PRESS.green(), T.PRESS.blue(),
+                                 int(165 * k))))
+        for (row, col) in f.cur_cells:
+            r = self._cell_rect(f, row, col,
+                                -f.cell * 0.06)     # 闪的时候再往外扩一点
+            p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
+
+    def _paint_flash(self, p: QPainter, f: _Frame):
+        """「按下去闪一下」的那层高亮 —— **青色**，不是黄。
+
+        用户：「按下去的时候要**闪烁一下**」，后来实测又报：
+        「闪烁的按键配色不对需要改，**感觉那个按下去的按键跟最后一个一样**」。
+
+        ★ 为什么从黄改成青 ★
+
+          原来这层用的是 `T.PRESS`（亮黄 255,214,74），而屏幕上的黄色系
+          本来就在说另一件事 —— 预告格是淡黄 (255,238,158)、圆圈是亮黄、
+          序号 `1` 也是亮黄，它们统一表示「**谱面告诉你该弹什么**」。
+
+          于是"你刚按的这一下"和"接下来要按的那个"是同一个颜色，
+          用户分不出来 —— 他自己描述成"跟最后一个一样"。
+
+          现在按**语义**分成两个色系：
+
+              黄（`T.PRESS` / `T.UPCOMING`）= 谱面提示：该弹哪个、还剩多久
+              青（`T.HIT`）               = 你已经按了
+
+          （历史注释里记着这层**本来**就是青的，中间为了"统成一个颜色"
+            改成了黄 —— 现在看那个统一是错的：它们不是同一件事。）
+        """
         now = time.monotonic()
         for fp in list(self.flash):
             left = self.flash[fp] - now
@@ -255,37 +1191,30 @@ class GridView(SheetView):
             pcell = layout.pitch_to_cell(fp)
             if pcell is None:
                 continue
-            prow, pcol = pcell
             k = min(1.0, left / 0.35)
-            fx = ox + pcol * (cell + T.GAP)
-            fy = oy + (3 - prow) * (cell + T.GAP)
-            fr = QRectF(fx, fy, cell, cell).adjusted(
-                -cell * 0.03, -cell * 0.03, cell * 0.03, cell * 0.03)
-            p.setPen(QPen(QColor(130, 255, 225, int(200 * k + 45)), 4.0))
-            p.setBrush(QBrush(QColor(90, 240, 200, int(140 * k + 25))))
-            p.drawRoundedRect(fr, T.RADIUS, T.RADIUS)
+            r = self._cell_rect(f, pcell[0], pcell[1], -f.cell * 0.03)
+            p.setPen(QPen(QColor(T.HIT.red(), T.HIT.green(), T.HIT.blue(),
+                                 int(210 * k + 45)), 4.0))
+            p.setBrush(QBrush(QColor(T.HIT.red(), T.HIT.green(),
+                                     T.HIT.blue(), int(170 * k + 30))))
+            p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
 
-        # ---- 底部：后面几个音的名字 ----
-        p.setFont(_fit_font(max(9.0, h * 0.028)))
-        names = []
-        for rank, (cells, rest, name) in enumerate(group[1:], start=1):
-            names.append(('休止' if rest else name) if cells or rest else '?')
-        tail = ' → '.join(names[:4]) if names else ''
-        p.setPen(QPen(T.TEXT_DIM))
-        p.drawText(QRectF(self.PAD, h - self.FOOTER_H, w - 2 * self.PAD,
-                          self.FOOTER_H - 6),
-                   Qt.AlignmentFlag.AlignCenter,
-                   ('下一个：' + tail) if tail else '')
+    # -- 底部提示 --
 
-        # ---- 提示：谱子里有琴弹不出来的音 ----
+    def _paint_unmapped_hint(self, p: QPainter, f: _Frame):
+        """谱子里有琴弹不出来的音时，底部给个红框提示。"""
         bad = _unmapped(self.timeline)
-        if bad:
-            p.setPen(QPen(QColor(255, 130, 130)))
-            p.setFont(_fit_font(max(9.0, h * 0.026)))
-            p.drawText(QRectF(self.PAD, h - self.FOOTER_H + 14,
-                              w - 2 * self.PAD, 20),
-                       Qt.AlignmentFlag.AlignCenter,
-                       '琴上没有这些音，会被跳过：' + ' '.join(bad[:6]))
+        if not bad:
+            return
+        msg = '琴上没有这些音，会被跳过：' + ' '.join(bad[:6])
+        p.setFont(_fit_font(max(9.0, f.h * 0.026)))
+        tw = p.fontMetrics().horizontalAdvance(msg) + 24
+        box = QRectF((f.w - tw) / 2.0, f.h - 30, tw, 24)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(30, 12, 14, 225)))
+        p.drawRoundedRect(box, 6, 6)
+        p.setPen(QPen(QColor(255, 130, 130)))
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter, msg)
 
 
 # ---------------- 小工具 ----------------
@@ -301,6 +1230,30 @@ def _fit_font(size: float, bold: bool = False) -> QFont:
     f.setPointSizeF(max(7.0, size))
     f.setBold(bold)
     return f
+
+
+def _paint_run(p: QPainter, x: float, y: float, w: float, h: float, n: int):
+    """在给定位置画一个 `×N` —— 这个键要连着按 N 下。
+
+    用户：「如果是连续点俩下在 1 下面写一个 X2」。
+
+    两处调用，位置不同、样式一样：
+      · **下一个格**：写在那颗序号圆圈的**下面**
+      · **当前格**（连按同一个键时"下一个"就是它自己）：写在左上角，
+        也就是序号圆圈本来该待的位置
+
+    ★ 为什么是黄底黑字，不是红底 ★
+      上一版做成了红底大徽章。红色是"警告"的语气，会跟当前格那块
+      亮黄抢注意力 —— 而这里只是"提示你等下还要按一下"。
+      所以用跟当前格同色系的黄底，克制一点。
+    """
+    box = QRectF(x, y, w, h)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(QColor(255, 206, 48, 246)))
+    p.drawRoundedRect(box, h * 0.36, h * 0.36)
+    p.setPen(QPen(QColor(28, 22, 0)))
+    p.setFont(_fit_font(h * 0.68, bold=True))
+    p.drawText(box, Qt.AlignmentFlag.AlignCenter, '×%d' % n)
 
 
 def _unmapped(tl: Timeline) -> list[str]:

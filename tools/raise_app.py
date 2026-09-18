@@ -34,14 +34,15 @@ SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_SHOWWINDOW = 0x2, 0x1, 0x10, 0x40
 
 
 def main() -> int:
-    hits = windows_with('卡丘琴谱器')
+    kw = sys.argv[1] if len(sys.argv) > 1 else '卡丘琴谱器'
+    hits = windows_with(kw)
     if not hits:
-        print('没找到「卡丘琴谱器」窗口 —— 是不是没启动？')
+        print('没找到「%s」窗口 —— 是不是没启动？' % kw)
         return 1
-    # 两个同名窗口：高的那个是控制台，矮的是谱面浮窗
+    # 多个命中时取最高的那个（控制台比谱面浮窗高）
     ctrl = max(hits, key=lambda t: t[2][3])
     hwnd = ctrl[0]
-    print('控制台：%s  %s' % (ctrl[1], ctrl[2]))
+    print('窗口：%s  %s' % (ctrl[1], ctrl[2]))
 
     _u.ShowWindow(wt.HWND(hwnd), SW_RESTORE)
     ok = _u.SetForegroundWindow(wt.HWND(hwnd))

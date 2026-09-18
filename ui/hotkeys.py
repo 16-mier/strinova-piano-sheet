@@ -28,10 +28,15 @@ MOD_NOREPEAT = 0x4000
 
 WM_HOTKEY = 0x0312
 
-# 四个用途各自的热键 id（互不冲突，也不跟别处撞）
+# 各个用途的热键 id（互不冲突，也不跟别处撞）
+#
+# ★ 0x6A03 / 0x6A05 已经空出来了 ★
+#   它们原来是「听音记谱」和「跟随画面 开/关」——
+#   那两个功能整体删掉了（用户：「取消跟踪和听歌识谱功能吧，精简一下」），
+#   对应的快捷键也就没有意义了。**号留着别复用**：
+#   老配置里万一还存着这两个号，复用会让它们突然绑到别的东西上。
 HK_PLAYPAUSE = 0x6A01
 HK_RESTART = 0x6A02
-HK_LISTEN = 0x6A03
 HK_TOGGLE = 0x6A04          # 显示 / 隐藏谱面浮窗
 
 _user32 = ctypes.windll.user32
@@ -60,16 +65,6 @@ HOTKEY_CHOICES: list[tuple[str, int, int]] = [
     *[('Ctrl+%d' % i, MOD_CONTROL, 0x30 + i) for i in range(1, 10)],
     *[('Alt+%d' % i, MOD_ALT, 0x30 + i) for i in range(1, 10)],
 ]
-
-HOTKEY_LABELS = [c[0] for c in HOTKEY_CHOICES]
-
-
-def choice_index_by_name(name: str) -> int:
-    for i, (label, _m, _v) in enumerate(HOTKEY_CHOICES):
-        if label == name:
-            return i
-    return 0
-
 
 # ======================================================================
 # 键名 / 绑定的读写

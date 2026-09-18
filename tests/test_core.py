@@ -5,8 +5,7 @@ import math
 
 import pytest
 
-from core import (edit_model, encode, layout, parser, timeline,
-                  transcribe)
+from core import edit_model, encode, layout, parser, timeline
 
 
 # ---------------- 时值：先加法，后乘法 ----------------
@@ -317,61 +316,62 @@ def test_edit_model_build():
     m = edit_model.EditModel(parser.parse('1 2 3'))
     assert len(m.notes) == 3
     assert math.isclose(m.total_beats, 3.0)
+    # ★ 内部模型是"绝对时间"，跟怎么写无关 ★
+    #   老写法（`1 2 3`）只是一种**输入形式** —— 进来就被摊平成绝对时间。
+    #   这样方块才能左右随便拖、才能互相重叠，而老格式的位置是
+    #   "前一个音 + 时值"推出来的，向左挪等于要求负间距
+    #   （负的休止符 token 不存在），怎么调都拖不动。
+    #
+    # ★ 写回：能写记谱法就写记谱法 ★
+    #   用户：「这个铺面文本并不适合人类创作修改」。
+    #   这份谱子本来是记谱法写的、位置正好落在整拍上，所以写回去
+    #   还是记谱法 —— 人一眼看懂"三个等长的音"，改起来也方便。
     assert m.rebuild() == '1 2 3'
 
 
-def test_move_note_inserts_rest():
-    """把第 2 个音往右挪 1 拍 —— 应该插进一个休止符，后面的音跟着走。"""
-    m = edit_model.EditModel(parser.parse('1 2 3'))
-    m.move_note(1, 1.0)
-    t = timeline.Timeline(parser.parse(m.rebuild()))
-    # 休止符也占一个 item，所以只看有声的音
-    audio = [it for it in t.items if not it.chord.is_rest]
-    assert len(audio) == 3
-    assert math.isclose(audio[0].start_beat, 0.0)
-    assert math.isclose(audio[1].start_beat, 2.0)
-    assert math.isclose(audio[2].start_beat, 3.0)
-    # 中间确实多了一个休止符
-    assert sum(1 for it in t.items if it.chord.is_rest) == 1
-
-
-def test_move_note_back_removes_rest():
-    m = edit_model.EditModel(parser.parse('1 - 2 3'))
-    assert math.isclose(m.gap_before(2), 1.0)
-    m.move_note(2, -1.0)
-    t = timeline.Timeline(parser.parse(m.rebuild()))
-    assert len(t.items) == 3          # 休止符被吃掉了
-    assert math.isclose(t.items[1].start_beat, 1.0)
-
-
-def test_move_cannot_go_negative():
-    m = edit_model.EditModel(parser.parse('1 2'))
-    m.move_note(1, -5.0)
-    t = timeline.Timeline(parser.parse(m.rebuild()))
-    assert math.isclose(t.items[1].start_beat, 1.0)
-
-
-def test_rebuild_preserves_original_tokens():
-    """原始写法（和弦、附点）回写时一个字节都不能变。"""
-    src = "1'&3'&5' ^^1-- 2"
-    m = edit_model.EditModel(parser.parse(src))
-    assert m.rebuild() == src
-
-
-def test_bpm_marks_survive_rebuild():
-    m = edit_model.EditModel(parser.parse('#120# 1 #180# 2'))
+def test_rebuild_falls_back_to_free_format():
+    """位置自由（拖过 / 从音频转来的）→ 退回 `秒:音高`。"""
+    m = edit_model.EditModel(parser.parse('0:1 0.37:2 1.11:3'))
     out = m.rebuild()
-    bpms = [e.bpm for e in parser.parse(out).events
-            if isinstance(e, parser.BpmChange)]
-    assert bpms == [120, 180]
+    assert ':' in out, '位置落不到记谱网格上，该写时间轴格式：%r' % out
+    # 而且读回来位置一点点都不能走
+    back = edit_model.EditModel(parser.parse(out))
+    assert ([round(n.start * edit_model.SPB, 3) for n in back.notes]
+            == [0.0, 0.37, 1.11])
 
 
-def test_drag_changes_total_time():
-    m = edit_model.EditModel(parser.parse('#60# 1 2 3'))
-    t0 = timeline.Timeline(parser.parse(m.rebuild()))
-    m.move_note(2, 2.0)
-    t1 = timeline.Timeline(parser.parse(m.rebuild()))
-    assert math.isclose(t1.total_sec - t0.total_sec, 2.0)
+def test_notation_roundtrip_keeps_times():
+    """记谱法写出去再读回来，位置逐个相等（不许四舍五入走音）。"""
+    m = edit_model.EditModel(parser.parse('测试\n1 1- ^5 3- 6'))
+    out = m.rebuild()
+    assert out.splitlines()[0] == '测试'
+    back = edit_model.EditModel(parser.parse(out))
+    assert ([round(n.start, 9) for n in m.notes]
+            == [round(n.start, 9) for n in back.notes])
+
+
+def test_free_move_left_and_overlap():
+    """★ 时间轴格式的核心能力：向左挪、和别的音重叠 ★"""
+    m = edit_model.EditModel(parser.parse('0:5 1:3 2:5'))
+    assert m.free
+    m.move_note_independent(m.notes[1], 0.3 / parser.SPB)
+    assert ([round(n.start * parser.SPB, 3) for n in m.notes]
+            == [0.0, 0.3, 2.0])
+    # 再挪一个到同一时刻：允许重叠
+    m.move_note_independent(m.notes[2], 0.3 / parser.SPB)
+    assert (sorted(round(n.start * parser.SPB, 3) for n in m.notes)
+            == [0.0, 0.3, 0.3])
+
+
+def test_legacy_text_becomes_absolute_time():
+    """老写法（含 `#BPM#`）进来也要被换算成绝对秒。"""
+    s = parser.parse('#60# 1 #120# 1')
+    assert s.free
+    ch = s.chords
+    assert math.isclose(ch[0].at, 0.0)
+    # ★ 60 BPM 下第一个音占满 1 秒，所以第二个音在 1.0 秒 ★
+    #   （按"新 BPM"折算是 0.5 —— 那是错的）
+    assert math.isclose(ch[1].at, 1.0)
 
 
 def test_remove_note():
@@ -430,18 +430,6 @@ def test_insert_tokens_at_position():
     audio = _audio(m)
     assert [it.chord.pitches[0] for it in audio] == ['1', '2', '3']
     assert math.isclose(audio[1].start_beat, 1.0)
-
-
-def test_insert_tokens_with_gap():
-    """间距 2 拍 = 一个音 + 停一拍（音紧跟在前一个后面，停一拍之后才是下一个）。"""
-    m = edit_model.EditModel(parser.parse('1'))
-    m.insert_tokens(1, ['5', '-'])
-    audio = _audio(m)
-    assert len(audio) == 2
-    assert math.isclose(audio[1].start_beat, 1.0)     # 5 紧跟在 1 后面
-    assert math.isclose(m.total_beats, 3.0)           # 1 拍音 + 1 拍音 + 1 拍停
-    t = timeline.Timeline(parser.parse(m.rebuild()))
-    assert math.isclose(t.total_beats, 3.0)
 
 
 def test_tokens_for_gap_sizes():
@@ -505,14 +493,6 @@ def test_merge_into_prev_makes_chord():
     # 回写成文本之后，解析回来还得是同一个和弦
     again = parser.parse(m.rebuild())
     assert again.chords[0].pitches == ['1', '3']
-
-
-def test_merge_keeps_longer_duration():
-    """合并时时值取长的那个 —— 不然音乐会莫名其妙变快。"""
-    m = edit_model.EditModel(parser.parse('1 3-'))
-    m.merge_into_prev(1)
-    assert m.notes[0].raw == '1&3-'
-    assert math.isclose(m.notes[0].dur, 2.0)
 
 
 def test_move_to_beat_snaps_into_chord():
@@ -581,138 +561,11 @@ def test_chord_survives_rebuild_roundtrip():
 
 # ---------------- 听音记谱 ----------------
 
-def test_pitch_freq_table():
-    # ★ 这台琴的 `1` 是 C3（130Hz），不是通常简谱的 C4 ——
-    #   从 16 个游戏原始采样里量出来的，见 tools/check_notes.py。
-    assert math.isclose(transcribe.pitch_freq('1'), 130.81, abs_tol=0.1)
-    assert math.isclose(transcribe.pitch_freq('8'), 261.63, abs_tol=0.1)
-    assert math.isclose(transcribe.pitch_freq("1'"), 261.63, abs_tol=0.1)
-    assert math.isclose(transcribe.pitch_freq("1''"), 523.25, abs_tol=0.3)
-    # 8 和 1' 在乐理上是同一个音高（游戏里是两个键）
-    assert math.isclose(transcribe.pitch_freq('8'),
-                        transcribe.pitch_freq("1'"), abs_tol=1e-6)
 
 
-def test_key_freqs_cover_all_16():
-    assert len(transcribe.KEY_FREQS) == 16
 
 
-def test_nearest_pitch_matches():
-    p, cents = transcribe.nearest_pitch(130.0)      # 这台琴的 `1` 是 C3
-    assert p == '1'
-    assert abs(cents) < 50
-    p2, _ = transcribe.nearest_pitch(520.0)
-    assert p2 in ("1''", '7\'')
-    # 完全跑调的音会给出很大的偏差
-    _p3, big = transcribe.nearest_pitch(50.0)
-    assert abs(big) > 200
 
-
-def test_transcribe_silence():
-    import numpy as np
-    tok, hits = transcribe.transcribe(
-        np.zeros(24000, dtype=np.float32), 48000)
-    assert tok == []
-    assert hits == []
-
-
-def test_transcribe_synthetic_sine():
-    """自己合成「1 3 5」，认出来的必须是期望序列的前缀（可能少认几个）。
-
-    注：偶尔会漏掉末尾的音 —— 见 DEVELOPMENT.md 的「已知问题」。
-    这里只锁住"不会认错音、不会乱序"这个底线。
-    """
-    import numpy as np
-
-    rate = 48000
-    seq = ['1', '3', '5']
-    spb = 0.5
-    total = int(len(seq) * spb * rate) + rate
-    audio = np.zeros(total, dtype=np.float64)
-    for i, p in enumerate(seq):
-        f = transcribe.pitch_freq(p)
-        n = int(spb * rate * 0.7)
-        t = np.arange(n) / rate
-        audio[i * int(spb * rate):][:n] += (
-            np.sin(2 * np.pi * f * t) * np.exp(-4.0 * t) * 0.8)
-
-    _tok, hits = transcribe.transcribe(audio, rate, bpm=120, min_margin=0.0)
-    got = [h.pitch for h in hits]
-    assert len(got) >= 2, '只认出 %d 个: %s' % (len(got), got)
-    assert got == seq[:len(got)], '认出 %s，期望是 %s 的前缀' % (got, seq[:len(got)])
-
-
-def test_same_pitch_follows_previous_key():
-    """`8` 和 `1'` 是同一个音高的两个键，识别时**跟着上一个音走**。
-
-    它俩基频完全一样（都是 262Hz），物理上分不开。跟着上一次的选择走，
-    同一首曲子里至少是统一的，不会一会儿 `8` 一会儿 `1'`。
-    """
-    import os
-
-    import pytest
-
-    from core import synth
-    from core.paths import app_dir
-
-    notes = synth.ensure_notes(os.path.join(app_dir(), 'assets', 'notes'))
-    if '8' not in notes:
-        pytest.skip('没有游戏原始采样，跳过')
-
-    seg, _rate = _as_seg(notes['8'])
-    plain = transcribe.match_key(seg, 48000)
-    followed = transcribe.match_key(seg, 48000, prefer="1'")
-    other = transcribe.match_key(seg, 48000, prefer='5')     # 不同音高，不该乱跟
-
-    assert plain[0] == "1'"             # 同音高的孪生键默认给带撇的那个（1'）
-    assert followed[0] == "1'"           # 上一个也是 1'，继续保持
-    assert other[0] == "1'"              # 上一个音是 5（另一个音高）不影响
-    # 两个名字指的是同一个音高
-    assert math.isclose(transcribe.pitch_freq(plain[0]),
-                        transcribe.pitch_freq(followed[0]), abs_tol=1e-6)
-
-
-def test_note_samples_pitch_table():
-    """把 16 个采样的实测基频打出来 —— 这是**待你在游戏里核对的清单**。
-
-    ⚠ 这里故意**不校验键名**，因为实测发现：
-        3.wav 和 3_up.wav 的基频都是 330Hz
-        6.wav 和 6_up.wav 的基频都是 440Hz
-        8.wav / 1_up.wav 的基频都是 261Hz
-      ……也就是说这 16 个采样里**只有 8 种音高**，好几对是重复的。
-      所以「文件名 ↔ 琴上哪个键」这层对应关系还没被证实，
-      必须**在游戏里实际弹一遍**才能定案（见 DEVELOPMENT.md）。
-
-    用 `python -m pytest tests -k pitch_table -s` 看完整表格。
-    """
-    import os
-
-    import pytest
-
-    from core import synth
-    from core.paths import app_dir
-
-    notes = synth.ensure_notes(os.path.join(app_dir(), 'assets', 'notes'))
-    if len(notes) < 16:
-        pytest.skip('没有游戏原始采样（assets/notes），跳过')
-
-    print()
-    print('  %-9s %-6s %8s' % ('采样文件', '实测', '基频'))
-    print('  ' + '-' * 30)
-    seen = {}
-    for pitch, path in sorted(notes.items()):
-        seg, _rate = _as_seg(path)
-        got = transcribe.match_key(seg, 48000)
-        assert got[0], '%s 认不出音高' % pitch
-        f = round(transcribe.pitch_freq(got[0]))
-        seen.setdefault(f, []).append(pitch)
-        print('  %-9s %-6s %8d Hz' % (pitch, got[0], f))
-    print('  ' + '-' * 30)
-    print('  不同音高只有 %d 种：%s'
-          % (len(seen), '  '.join('%dHz×%d' % (f, len(v))
-                                  for f, v in sorted(seen.items()))))
-    # 底线：至少得认出 8 种不同音高，不然说明识别整个坏掉了
-    assert len(seen) >= 8, '只认出 %d 种音高，识别有问题' % len(seen)
 
 
 def _as_seg(path, n: int = 12000):
@@ -729,28 +582,3 @@ def _as_seg(path, n: int = 12000):
         a = np.pad(a, (0, n - len(a)))
     return a[:n], 48000
 
-
-def test_chord_is_collapsed_to_strongest_note():
-    """和弦（同时按多个键）目前只会认成最强的那一个 —— 已知限制，锁住行为。"""
-    import numpy as np
-
-    from core import synth
-    import os
-    from core.paths import app_dir
-
-    notes = synth.ensure_notes(os.path.join(app_dir(), 'assets', 'notes'))
-    if '1' not in notes or '5' not in notes:
-        import pytest
-        pytest.skip('没有游戏原始采样，跳过')
-
-    a1, _ = _as_seg(notes['1'])
-    a5, _ = _as_seg(notes['5'])
-    mixed = a1 * 0.5 + a5 * 1.0          # 5 更响
-    pitch, _f, _m = transcribe.match_key(mixed, 48000)
-    # 不锁"认成哪个"：1 和 5 是纯五度（频率 2:3），谐波大面积重合，
-    # 谁强谁弱本来就含糊。只锁"不会认成一个跟它俩都不相干的音"。
-    assert pitch in ('1', '5', "1'", '8'), '认成了不相干的 %s' % pitch
-
-    n1, _f1, m1 = transcribe.match_key(a1, 48000)
-    n5, _f5, m5 = transcribe.match_key(a5, 48000)
-    assert (n1, n5) == ('1', '5')         # 单独听的时候都是准的

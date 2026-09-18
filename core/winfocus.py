@@ -186,9 +186,3 @@ def find_game_window() -> int:
         if area > best_area:
             best, best_area = hwnd, area
     return best
-
-
-def game_window_rect() -> tuple[int, int, int, int] | None:
-    """游戏主窗口的位置和大小（物理像素）；游戏没开返回 None。"""
-    hwnd = find_game_window()
-    return window_rect(hwnd) if hwnd else None

@@ -80,18 +80,44 @@ class NotePlayer:
 
 
 class KeyPad(QWidget):
-    """4×4 打击垫。点一下 = 出一声 + 发 note_clicked 信号。"""
+    """4×4 打击垫。点一下 = 出一声 + 发 note_clicked 信号。
 
-    note_clicked = pyqtSignal(str)
+    ★ 三种多选方式 ★
+      · 按住左键拖着划过去 —— 划过的格子都进选区，松手一起落笔
+      · Shift + 拖动 —— 矩形框选一整"段"，松手一起落笔
+      · Shift + 单击 —— **逐个挑**：点一下进绿色名单，**再点同一个就取消**
+        这个是累加的，隔得老远的几个键也能慢慢挑，不像拖动那样容易划错。
+        挑完按「⬒ 写和弦」落笔；右键点一下垫子 = 把挑好的清空。
+
+    ★ 为什么「松手才写入」★
+      按下只**出声预览**，松手才真正落笔 —— 按下去就写的话，
+      手一抖点歪了也得再按一次撤销。单击的手感没变（按下出声、
+      松手落笔，中间差不到一瞬）。
+
+    ★ 那套"多选写和弦"已经删了 ★ —— 用户：「和弦功能用不到」
+
+      原来这里有三种**一起落笔**的方式：按住拖动划过一串、
+      Shift 拖出一个矩形、Shift 逐个挑再按「写和弦」按钮。
+      它们服务的都是同一件事：同一时刻按下好几个键 = 谱面里一个
+      `1&3&5` 的和弦块。
+
+      用户不写和弦，整套就没用了，只留最直接的"点一下写一个音"。
+      （谱面里本来就有的和弦照样能显示、能编辑 —— 那是
+        `parser` / `EditModel` 的事，跟这里没关系。）
+    """
+
+    note_clicked = pyqtSignal(str)      # 点了一个键（松手时才发）
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.player = NotePlayer()
-        self._flash: dict[tuple[int, int], int] = {}     # 格子 -> 剩余闪烁帧
-        self._pressed: set[tuple[int, int]] = set()
+        self._flash: dict[tuple[int, int], int] = {}      # 格子 -> 剩余闪烁帧
+        self._press_cell: tuple[int, int] | None = None   # 按下时命中的那一格
         self.setMinimumSize(260, 260)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # 只认鼠标，不抢焦点
         self.setMouseTracking(False)
+        self.setToolTip('点一下出声，松手写进谱面。\n'
+                        '（会不会真写进去，看上边那个「同步写入谱面」）')
 
     # ---- 音源 ----
 
@@ -123,7 +149,18 @@ class KeyPad(QWidget):
 
     # ---- 触发 ----
 
+    def strike(self, row: int, col: int):
+        """按一下的手感：出声 + 闪一下（**不发信号**，写入由松手时决定）。"""
+        self.player.play(layout.cell_to_pitch(row, col))
+        self._flash[(row, col)] = 8
+        self.update()
+
     def trigger(self, row: int, col: int):
+        """完整触发：出声 + 闪 + 发 note_clicked。
+
+        ★ 只有测试在用 ★（`tools/test_editor_chord.py`）——
+          生产代码走鼠标那条路：按下 `strike()`、松手才发信号。
+        """
         pitch = layout.cell_to_pitch(row, col)
         self.player.play(pitch)
         self._flash[(row, col)] = 8
@@ -141,17 +178,36 @@ class KeyPad(QWidget):
     # ---- 鼠标 ----
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            hit = self._hit(event.position())
-            if hit:
-                self._pressed.add(hit)
-                self.trigger(*hit)
-                event.accept()
-                return
-        super().mousePressEvent(event)
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        hit = self._hit(event.position())
+        if not hit:
+            super().mousePressEvent(event)
+            return
+        self._press_cell = hit
+        self.strike(*hit)               # 按下先出声，让人知道点着了
+        event.accept()
 
     def mouseReleaseEvent(self, event):
-        self._pressed.clear()
+        """松手落笔 —— 点一下写一个音。
+
+        ★ 只剩这一条路了 ★
+          以前这里还分"一格发单音 / 多格发和弦"，那套多选已经删了
+          （用户：「和弦功能用不到」）。
+
+        ★ 还得确认"松手的时候手还在同一格"★
+          按下之后划出去再松开（本来想点 A、结果拖到了 B 上），
+          不该把 A 写进去 —— 那属于"点空了"，什么都不写。
+        """
+        cell = self._press_cell
+        self._press_cell = None
+        if (event.button() == Qt.MouseButton.LeftButton
+                and cell is not None):
+            if self._hit(event.position()) == cell:
+                self.note_clicked.emit(layout.cell_to_pitch(*cell))
+            event.accept()
+            return
         self.update()
         super().mouseReleaseEvent(event)
 
@@ -188,7 +244,8 @@ class KeyPad(QWidget):
                 r = self._cell_rect(row, col)
                 pitch = layout.cell_to_pitch(row, col)
                 flash = self._flash.get((row, col), 0)
-
+                # （原来这里还有两种底色：拖动中的蓝色、Shift 挑中的
+                #   绿色 —— 那套多选删了，现在只剩"按下去黄色一闪"。）
                 if flash > 0:
                     k = flash / 8.0
                     fill = QColor(255, 206, 48, int(120 + 135 * k))

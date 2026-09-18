@@ -1,14 +1,47 @@
+# ---- Python ----
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
+
+# ---- 打包产物 ----
 build/
 dist/
-*.spec
+# （`卡丘琴谱器.spec` **要**提交：它是手写的构建配置，不是自动生成的）
+
+# ---- 运行时生成的 ----
 config.json
-run.err
-run.out
-_dbg.txt
-_rec.txt
+config.json.bak*
+_crash.log
+*.err
+*.out
+
+# ---- 生成物 / 旧备份 ----
+#   `core/note_cnn.*` 是 `tools/train_note_cnn.py` 训出来的模型，
+#   属于已经整套删掉的"听音识谱"（见 DEVELOPMENT.md §16.38）——
+#   主程序没有任何一行代码读它，所以别把二进制塞进仓库。
+#   `DEVELOPMENT_v1_backup.md` 是手册改版前的备份，留着占地方。
+core/note_cnn.npz
+core/note_cnn.json
+DEVELOPMENT_v1_backup.md
+
+# ---- 开发期间的临时截图 / 日志 / 探针 ----
+#   ★ 一律以下划线开头 ★
+#     这个约定本来就在用（`_audit_code.md`、`_ring_01_approach.png`、
+#     `_sweep_*.txt`……），只是原来没写进 .gitignore，于是
+#     147 项里有一多半是这些东西。开源之前统一收掉。
+_*
 preview_*.png
 shot_*.png
+eval_drift.png
+
+# ---- 音频样本（体积大，而且要本地生成）----
 assets/notes_raw/
 assets/notes_game/
+*.wav
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

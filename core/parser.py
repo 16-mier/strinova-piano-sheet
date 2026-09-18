@@ -41,10 +41,16 @@ class Chord:
     raw: str                  # 原始 token（含修饰符）
     line: int = 0
     col: int = 0
+    # ★ 「时间轴谱面」专用：这个音的**绝对开始时间（秒）** ★
+    #   `None` = 老格式（顺序记谱，位置靠前面的累计时值推出来）。
+    #   不是 None 时，位置就是它自己说了算 —— 于是可以向左挪、
+    #   可以和别的音重叠，这些老格式在数学上就表达不了。
+    at: float | None = None
 
     def __str__(self) -> str:
         if self.is_rest:
-            return '休止%s拍' % _fmt(self.duration)
+            # 不带单位 —— `duration` 内部是"拍"，但界面上不出现这个字。
+            return '休止%s' % _fmt(self.duration)
         return '+'.join(self.pitches)
 
 
@@ -105,6 +111,11 @@ class Sheet:
     events: list = field(default_factory=list)
     source: str = ''
     title: str = ''
+    # ★ 是不是「时间轴谱面」★
+    #   True  = 每个音自己带绝对时间（`秒:音高`），位置互相独立，
+    #           可以向左挪、可以重叠。制谱器按这个决定用哪套编辑规则。
+    #   False = 老格式（顺序记谱），位置靠前面的累计时值推出来。
+    free: bool = False
 
     # ---- 便捷视图 ----
 
@@ -139,6 +150,69 @@ class Sheet:
                 lines.append('  ...')
                 break
         return '\n'.join(lines)
+
+
+DEFAULT_BPM = 120
+
+# ★ 时间轴谱面的秒 ↔ 拍换算 ★
+#   新写法（`秒:音高`）直接写秒，而 `Chord.duration` 这类老字段仍然按"拍"。
+#   取 0.5 = BPM 120 —— **纯粹是个换算系数**，跟演奏速度无关。
+#
+#   ★ 但界面上**不再出现「拍」**★
+#     用户：「完全按照时间轴来，去掉节拍这个东西」。
+#     下面这个 0.5 只活在代码内部；凡是给人看的地方一律显示**秒**
+#     —— 见 `ui/editor.py` 的 `lbl_pos` 和 `EditModel.stats()`。
+#     所以读到这里别把它当成"用户概念里的拍"，它就是个 ×2 的刻度，
+#     跟曲子标不标 `#120#` 也没有任何关系。
+SPB = 0.5
+
+
+def _finalize_free(sheet: 'Sheet') -> None:
+    """★ 把整篇统一成「时间轴谱面」：位置一律是**绝对秒** ★
+
+    老写法（`5 3 5`、`1 - 2`）在这里被换算成秒 —— 于是「旧格式」
+    只是一种**输入写法**，进来之后内部只有一种模型：每个音自己带
+    绝对时间，编辑器可以随便左右拖、随便重叠。
+
+    为什么非得在这一层摊平：老写法的位置是"前一个音 + 时值"**推**出来的，
+    向左挪等于要求"负间距"，而负的休止符 token 不存在 —— 数学上就做不到。
+    """
+    # ★ 按**秒**往前走，不要按拍累加 ★
+    #   拍速会被 `#BPM#` 改掉，而"这个音在第几秒"取决于**它当时**的 BPM。
+    #   原来写成 `at = beat * (60/bpm)`，于是 `#60# 1 #120# 1` 里
+    #   第二个音被按 120 折算成 0.5 秒 —— 而它其实在 1.0 秒
+    #   （第一个音在 60 BPM 下占满 1 秒）。
+    t = 0.0
+    bpm = DEFAULT_BPM
+    ch: list[Chord] = []
+    bpms: list[int] = []
+    for ev in sheet.events:
+        if isinstance(ev, BpmChange):
+            if ev.bpm > 0:
+                bpm = ev.bpm
+            continue
+        if not isinstance(ev, Chord):
+            continue
+        if ev.at is None:
+            ev.at = t
+        t = ev.at + ev.duration * (60.0 / max(1, bpm))
+        ch.append(ev)
+        bpms.append(bpm)
+    # 时值仍然按**拍**（`Timeline` 等下游用的就是这个单位）：
+    # 拿相邻两个音的绝对秒差、按**它当时的 BPM** 折回来。
+    #   ★ 别用全局 SPB ★ —— 那是 BPM 120 的系数，
+    #   碰到 `#60#` 会算成"1 拍 = 2 拍"。
+    #   ★ 最后一个音保留它原本的时值 ★ —— 老写法里 token 自带
+    #   （`1-` 就是 2 拍）；新写法里没有"下一个音"可参照，
+    #   给 1 拍收尾即可。原来无脑覆盖成 1 拍，会把 `#180# ^1 ^2 ^3`
+    #   这种三连音的总长度算错。
+    for i, c in enumerate(ch):
+        if i + 1 < len(ch):
+            spb = 60.0 / max(1, bpms[i])
+            c.duration = max(0.0, (ch[i + 1].at - c.at) / spb)
+        elif c.duration <= 0:
+            c.duration = 1.0
+    sheet.free = True
 
 
 def _is_bpm_token(token: str) -> bool:
@@ -210,6 +284,32 @@ def parse(text: str) -> Sheet:
                                        line=start_line, col=start_col))
             continue
 
+        # --- ★ 时间轴格式：`秒:音高` ★ ---
+        #   例：`0:5 0.25:3 1:1'&3' 2.5:2'`
+        #   冒号左边是**绝对开始时间（秒）**，右边还是老记谱法的音高。
+        #   一旦出现这种 token，整篇就按"时间轴谱面"处理（`sheet.free`）——
+        #   每个音的位置自己说了算，不再由前面的音累加推算。
+        #   放在 `is_valid_token` 之前，因为 `:` 不在白名单里。
+        if ':' in token:
+            head, _, tail = token.partition(':')
+            try:
+                at = float(head)
+            except ValueError:
+                at = None
+            if at is not None:
+                sheet.free = True
+                pending_prefix = ''
+                body = tail
+                for ch in ("^", "-", "~"):
+                    body = body.replace(ch, '')
+                pitches = split_chord(body)
+                if pitches:
+                    events.append(Chord(pitches=pitches, duration=0.0,
+                                        is_rest=False, raw=token,
+                                        line=start_line, col=start_col,
+                                        at=at))
+                continue
+
         # --- 合法性校验：非法就整段跳过，不留空档 ---
         if not is_valid_token(token):
             pending_prefix = ''
@@ -234,6 +334,9 @@ def parse(text: str) -> Sheet:
                             is_rest=is_rest, raw=full,
                             line=start_line, col=start_col))
 
+    # ★ 统一成绝对时间（时间轴谱面）★
+    #   老写法在这里被换算成秒，之后内部只有一种模型。
+    _finalize_free(sheet)
     return sheet
 
 

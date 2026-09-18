@@ -5,78 +5,59 @@
 文件目录还是加密的，逆向不值得。这里改用「基频 + 若干泛音 + 指数衰减包络」
 合成，听感接近钢琴/马林巴，用来听音高和节奏完全够。
 
-频率取 C4 大调：中音 1 = C4 (261.63Hz)，往上按自然音阶排。
+★ 音高基准**只认 `core/notes.py` 那一套** ★
+  简谱的 `1` 在这台琴上是 **C3 (130.81 Hz)** —— 频率表的唯一真源是
+  `notes.pitch_freq`，本模块把它**转出**，不再自己写一份。
+  以前这里按「中音 1 = C4 (261.63Hz)」算，和真源**差一个八度**：
+  `render.load_sample` 走到合成兜底时音高全是错的（整张表高了一个八度）。
+  （那张表早先住在 `core/transcribe.py`（听音记谱）里，听音删掉之后
+     挪到了 `core/notes.py` —— 它本来就不是听音，是"键的身份表"。）
 """
 
 from __future__ import annotations
 
-import math
 import os
-import struct
 import wave
 
+import numpy as np
+
 from . import layout
+# ★ 转出别名 ★ —— 唯一真源在 `notes`；这里只是让老调用点
+#   （`core/render.py`、`tools/synth_dataset.py`）拿到同一套频率。
+from .notes import pitch_freq             # noqa: F401
 
 RATE = 44100
 DUR = 1.1                 # 单音持续时长（秒）
 
-_BASE = 261.6255653       # C4
-# 大调音阶的半音偏移（do re mi fa sol la si）
-_SEMITONES = [0, 2, 4, 5, 7, 9, 11]
 # 泛音配比 —— 决定音色
 _PARTIALS = [(1, 1.0), (2, 0.45), (3, 0.22), (4, 0.12), (5, 0.07), (6, 0.04)]
 
 
-def pitch_freq(pitch: str) -> float:
-    """音高标签 -> 频率(Hz)。琴上没有的音也会算出一个值。"""
-    p = pitch or '1'
-    sharp = p.startswith('#')
-    p = p.lstrip('#')
-
-    octave = 0
-    while p.endswith("'"):
-        octave += 1
-        p = p[:-1]
-    if p.endswith('.'):
-        octave -= 1
-        p = p[:-1]
-
-    if p == '8':
-        # 游戏里的第 8 个键（乐理上等于高音 1）
-        semi = 0
-        octave += 1
-    else:
-        try:
-            d = int(p)
-        except ValueError:
-            d = 1
-        d = max(1, min(7, d))
-        semi = _SEMITONES[d - 1]
-
-    if sharp:
-        semi += 1
-
-    return _BASE * (2.0 ** octave) * (2.0 ** (semi / 12.0))
-
-
 def render(freq: float, dur: float = DUR, rate: int = RATE) -> bytes:
-    """合成一个音，返回 16-bit 单声道 PCM。"""
+    """合成一个音，返回 16-bit 单声道 PCM。
+
+    ★ numpy 向量化 ★
+      以前是逐样本的 Python 循环（1.1 秒 × 44100 样本 × 6 个泛音 ≈ 29 万次
+      `math.sin`，还要每次 `struct.pack` 追加 bytes）—— 单音要 100 ms 上下，
+      而 `ui/keypad.py` 在 UI 线程里一次要生成 16 个 ⇒ 窗口白屏 1 秒多。
+      现在每个泛音一次性相加、一次性转成 `<i2`，结果字节完全一致
+      （浮点转整数的截断方向和原来的 `int()` 一样，都是向零取整）。
+    """
     n = int(dur * rate)
+    if n <= 0:
+        return b''
     nyq = rate / 2.0
-    buf = bytearray()
-    for i in range(n):
-        t = i / rate
-        # 快起音 + 指数衰减，避免爆音
-        env = math.exp(-3.2 * t) * (1.0 - math.exp(-300.0 * t))
-        s = 0.0
-        for k, amp in _PARTIALS:
-            f = freq * k
-            if f >= nyq:
-                break
-            s += amp * math.sin(2.0 * math.pi * f * t)
-        v = int(max(-1.0, min(1.0, s * env * 0.22)) * 32767)
-        buf += struct.pack('<h', v)
-    return bytes(buf)
+    t = np.arange(n, dtype=np.float64) / float(rate)
+    # 快起音 + 指数衰减，避免爆音
+    env = np.exp(-3.2 * t) * (1.0 - np.exp(-300.0 * t))
+    s = np.zeros(n, dtype=np.float64)
+    for k, amp in _PARTIALS:
+        f = freq * k
+        if f >= nyq:
+            break
+        s += amp * np.sin(2.0 * np.pi * f * t)
+    v = np.clip(s * env * 0.22, -1.0, 1.0)
+    return (v * 32767.0).astype('<i2').tobytes()
 
 
 def write_wav(path: str, pcm: bytes, rate: int = RATE) -> None:
