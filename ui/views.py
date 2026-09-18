@@ -610,6 +610,14 @@ class GridView(SheetView):
         if self.keys_only:
             self._panel(p)
             self._paint_blank_cells(p)
+            # ★ 按下去照样得闪 ★
+            #   用户：「可按的时候按下去的按键没有高亮」——
+            #   上一版这里直接 `return`，把 `_paint_flash` 一起跳过了。
+            #   收起来的是**谱面提示**（"该弹哪个键"），
+            #   而"我刚按了哪个"是另一回事，必须留着 ——
+            #   手动弹琴时没有这个反馈，就不知道自己到底点中没有。
+            #   （`_paint_flash` 现在用 `_geom()` 算位置，不需要 `_frame()`。）
+            self._paint_flash(p)
             return
 
         if not self.timeline or not self.timeline.items:
@@ -620,6 +628,8 @@ class GridView(SheetView):
             if self.pad_click:
                 self._paint_blank_cells(p)
             self._hint(p, '还没有谱子')
+            # 按下去的青色闪一下照样要画（空字典时它什么都不做，成本为零）
+            self._paint_flash(p)
             return
 
         f = self._frame()
@@ -628,6 +638,7 @@ class GridView(SheetView):
             if self.pad_click:
                 self._paint_blank_cells(p)
             self._hint(p, '演奏结束')
+            self._paint_flash(p)          # 同上
             return
 
         # ★ 底板先画 ★
@@ -639,7 +650,7 @@ class GridView(SheetView):
         #   删掉之后那 50 px 全给网格。见类头的 `HEADER_H`。）
         self._paint_cells(p, f)
         self._paint_hot_flash(p, f)
-        self._paint_flash(p, f)
+        self._paint_flash(p)
         self._paint_rings(p, f)
         self._paint_labels(p, f)
         self._paint_badges(p, f)
@@ -1159,7 +1170,46 @@ class GridView(SheetView):
                                 -f.cell * 0.06)     # 闪的时候再往外扩一点
             p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
 
-    def _paint_flash(self, p: QPainter, f: _Frame):
+    def _flash_marks(self) -> list[tuple[QRectF, float]]:
+        """当前该闪的格子：`[(矩形, 剩余比例 k)]`。
+
+        ★ 用 `_geom()`，**不用** `_frame()` ★
+          这一层原来挂在 `_paint_flash(p, f)` 里，位置从 `f` 算。
+          可 `_frame()` 在"还没载入谱面"和"曲子播完了"这两种情况下
+          返回 `None` —— 而「可按」模式下**恰恰经常就是这两种情况**
+          （用户在手动弹，谱面可能压根没在播）。
+          于是按下去不闪 —— 这就是用户报的
+          「可按的时候按下去的按键没有高亮」。
+
+          改用 `_geom()`（只看窗口大小）之后，跟 `_cell_at()` 同源：
+          **"点得到的格子"和"闪着的高亮"永远是同一块地方**，
+          不会出现"点中了但高亮画歪了"。
+
+        ★ 过期的条目顺手删掉 ★
+          `has_flash()` 里也删一遍，那个是给 8 ms 定时器判断
+          "还要不要继续转"用的；两处都删一下没有副作用。
+        """
+        now = time.monotonic()
+        ox, oy, cell = self._geom()
+        out: list[tuple[QRectF, float]] = []
+        for fp in list(self.flash):
+            left = self.flash[fp] - now
+            if left <= 0:
+                del self.flash[fp]
+                continue
+            pcell = layout.pitch_to_cell(fp)
+            if pcell is None:
+                continue
+            row, col = pcell
+            r = QRectF(ox + col * (cell + T.GAP),
+                       oy + (3 - row) * (cell + T.GAP), cell, cell)
+            # 闪的时候往外扩一点（跟原来 `_cell_rect(..., -cell*0.03)` 一致）
+            r = r.adjusted(-cell * 0.03, -cell * 0.03,
+                           cell * 0.03, cell * 0.03)
+            out.append((r, min(1.0, left / 0.35)))
+        return out
+
+    def _paint_flash(self, p: QPainter):
         """「按下去闪一下」的那层高亮 —— **青色**，不是黄。
 
         用户：「按下去的时候要**闪烁一下**」，后来实测又报：
@@ -1181,18 +1231,12 @@ class GridView(SheetView):
 
           （历史注释里记着这层**本来**就是青的，中间为了"统成一个颜色"
             改成了黄 —— 现在看那个统一是错的：它们不是同一件事。）
+
+        ★ 位置由 `_flash_marks()` 算 ★
+          它用 `_geom()` 而不是 `_frame()`，所以没谱面 / 演奏结束时
+          照样闪 —— 见那个方法的注释。
         """
-        now = time.monotonic()
-        for fp in list(self.flash):
-            left = self.flash[fp] - now
-            if left <= 0:
-                del self.flash[fp]
-                continue
-            pcell = layout.pitch_to_cell(fp)
-            if pcell is None:
-                continue
-            k = min(1.0, left / 0.35)
-            r = self._cell_rect(f, pcell[0], pcell[1], -f.cell * 0.03)
+        for r, k in self._flash_marks():
             p.setPen(QPen(QColor(T.HIT.red(), T.HIT.green(), T.HIT.blue(),
                                  int(210 * k + 45)), 4.0))
             p.setBrush(QBrush(QColor(T.HIT.red(), T.HIT.green(),
