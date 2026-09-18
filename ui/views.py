@@ -48,7 +48,34 @@ from . import theme as T
 #   1.2 秒 ≈ 120 BPM 下的两拍半。这个长度刚好罩住"接下来两三个音"
 #   （一般曲子一秒钟弹 2~4 个音），既看得清先后、又不至于糊成一片。
 #   实测手感：从圈出现到缩到中心，够你看一眼并抬手，不会手忙脚乱。
+#
+#   ★ 现在它退化成"上限 + 默认值"，不再是固定时长 ★
+#     用户：「可以把那个圆圈往内缩入的速度跟音符速度匹配」
+#           「同一个速度有时候太慢」。
+#
+#     原来这里是**一个固定值**：不管曲子多快多慢，圈永远用 1.2 秒缩完。
+#     两头都不对 ——
+#       · 快的地方（相邻两个音只隔 0.25 秒）：圈收得太慢，屏幕上
+#         同时挂着好几个圈在慢慢缩，反而看不出"下一个是哪个"；
+#       · 慢的地方：圈早早缩到中心，然后杵在那儿等半天。
+#
+#     现在**每个音用自己的间隔**：
+#         lead = 这个音的 start_sec - 上一个音的 start_sec
+#     （在 `_upcoming_timed()` 里算好，跟着 `f.timed` 一路传下去）。
+#     快的地方圈收得快、慢的地方收得慢 —— 而且"圈开始缩"那一刻
+#     天然就踩在**上一个音**上，"缩到中心"永远落在**这个音**上。
+#
+#     于是 1.2 这个数只剩两个作用：
+#       · **上限** —— 慢曲子里两个音隔 3 秒，圈不该在屏幕上挂那么久；
+#       · **默认值** —— 曲子第一个音没有"上一个音"，就用它。
 LEAD = 1.2
+
+# ★ 收缩时长的下限（秒）★
+#   间隔比这个还短的话（180 BPM 的十六分音符只隔 0.083 秒），
+#   圈就变成"闪一下"了 —— 那还不如不画：它来不及传达任何
+#   "还剩多久"的意思，只会让人以为屏幕在抖。
+#   0.35 秒是"还看得出它在缩"的最短时间。
+LEAD_MIN = 0.35
 
 # 圆圈最大半径 = 格子边长 × 这个系数。
 #
@@ -73,7 +100,8 @@ RING_A_MAX = 255
 # 进度低于这个值时，在圆心补一个实心亮点。
 #
 # ★ 这个数被实测打过一次脸：原来取 0.34 ★
-#   0.34 意味着**还剩 0.41 秒**（0.34 × LEAD）时，中心就冒出亮点了。
+#   0.34 意味着**还剩 0.41 秒**（0.34 × 1.2，那会儿分母还是固定的）时，
+#   中心就冒出亮点了。
 #   用户看到那颗点，以为"到了"，于是报：
 #   「圆圈圈到中心点的时机**有点提前了**」——
 #   提前量整整 0.4 秒，难怪感觉得出来。
@@ -354,27 +382,52 @@ class SheetView(QWidget):
                         '+'.join(item.chord.pitches)))
         return out
 
-    def _upcoming_timed(
-            self) -> list[tuple[list[tuple[int, int]], bool, str, float]]:
-        """和 `_current_group()` 同源，但**多带一个"这个音在第几秒"**。
+    def _upcoming_timed(self) -> list[tuple[
+            list[tuple[int, int]], bool, str, float, float]]:
+        """和 `_current_group()` 同源，但多带两样东西：
+        「这个音在第几秒」和「这个音的圈该用多久缩完」。
 
         ★ 为什么要另开一个方法，不把时间塞进 `_current_group()` ★
           返回形状是别人依赖的契约（见 `_current_group()` 的注释），
           塞个第四项进去 → 所有 `for cells, rest, name in group` 一起炸，
           而其中一部分在测试里。与其改契约，不如**再开一条平行的**：
-          形状一样、只多一个字段，谁要时间谁来拿。
+          形状一样、只多两个字段，谁要时间谁来拿。
+
+        ★ 最后一个字段 `lead`：**每个音用自己的间隔** ★
+          用户：「可以把那个圆圈往内缩入的速度跟音符速度匹配」
+               「同一个速度有时候太慢」。
+          见 `LEAD` 那段注释。算法一行：
+
+              lead = 这个音的 start_sec - 上一个音的 start_sec
+
+          然后夹在 `[LEAD_MIN, LEAD]` 之间：
+            · 下限挡住"快到圈会闪一下"（十六分音符连击）；
+            · 上限挡住"慢到圈挂半天"（长休止之后的第一个音）。
+
+          ★ 这里自己遍历 `items`，不调 `timeline.upcoming()` ★
+            因为要**索引**才能回头拿 `items[i-1]`。行为跟 `upcoming()`
+            完全一致（它就是 `items[start:start+count]`），只是多一个
+            `i` 可用。
         """
         if not self.timeline or not self.timeline.items:
             return []
+        items = self.timeline.items
+        start = max(0, self.timeline.index_at(self.sec))
         out = []
-        for item in self.timeline.upcoming(self.sec, self.preview_count):
+        for i in range(start, min(start + self.preview_count, len(items))):
+            item = items[i]
             cells = []
             for pitch in item.chord.pitches:
                 cell = layout.pitch_to_cell(pitch)
                 if cell is not None:
                     cells.append(cell)
+            if i > 0:
+                lead = item.start_sec - items[i - 1].start_sec
+                lead = max(LEAD_MIN, min(LEAD, lead))
+            else:
+                lead = LEAD               # 曲子第一个音：没有"上一个"可比
             out.append((cells, item.chord.is_rest,
-                        '+'.join(item.chord.pitches), item.start_sec))
+                        '+'.join(item.chord.pitches), item.start_sec, lead))
         return out
 
     # ---- 收缩圆圈的"还有东西要重绘吗" ----
@@ -389,11 +442,15 @@ class SheetView(QWidget):
             return False                 # 不画 = 屏幕上什么都没有
         if timed is None:
             timed = self._upcoming_timed()
-        for _cells, rest, _name, start in timed:
+        for _cells, rest, _name, start, lead in timed:
             if rest:
                 continue                 # 休止符没有格子可画
             left = start - self.sec
-            if -RING_TAIL <= left <= LEAD:
+            # ★ 判据用这个音**自己的** `lead` ★
+            #   从前这里写死的是全局 `LEAD`。现在每个音的收缩时长
+            #   各不相同 —— 用错这个数的话，慢曲子会提前返回 False，
+            #   圈缩到一半就没人来重绘、**冻在屏幕上**。
+            if -RING_TAIL <= left <= lead:
                 return True
         return False
 
@@ -471,8 +528,11 @@ class _Frame:
     oy: float
     # [(格子列表, 是否休止, 音名)] —— 形状跟 `_current_group()` 一致
     group: list[tuple[list[tuple[int, int]], bool, str]]
-    # 同上，但多一个 start_sec（收缩圆圈要算"还剩多久"）
-    timed: list[tuple[list[tuple[int, int]], bool, str, float]]
+    # 同上，但多两个数：
+    #   start_sec —— 这个音在第几秒（收缩圆圈要算"还剩多久"）
+    #   lead      —— 这个音的圈该用多久缩完（= 它跟上一个音的间隔，
+    #                夹在 `[LEAD_MIN, LEAD]` 之间；见 `_upcoming_timed()`）
+    timed: list[tuple[list[tuple[int, int]], bool, str, float, float]]
     orders: dict[tuple[int, int], list[int]]
     blinking: bool                   # 谱面提示层整体开着吗
     hot_flash: bool                  # 「就是现在」那一下还亮着吗
@@ -548,7 +608,7 @@ class GridView(SheetView):
         self.sec = sec
         timed = self._upcoming_timed()
         key = tuple((tuple(cells), rest, name)
-                    for cells, rest, name, _t in timed)
+                    for cells, rest, name, _t, _lead in timed)
         changed = key != self._last_key
         if changed:
             self._cur_stamp = time.monotonic()       # 换音了 → 黄色重新闪一下
@@ -905,7 +965,10 @@ class GridView(SheetView):
     def _paint_rings(self, p: QPainter, f: _Frame):
         """★ 用户要的"一个圆圈向内聚集，聚集到中心的点上就是点的时机" ★
 
-        ★ 半径公式：`r = R_MAX × (离这个音还有多久 / LEAD)` ★
+        ★ 半径公式：`r = R_MAX × (离这个音还有多久 / lead)` ★
+          分母是**这个音自己的** `lead`（= 它跟上一个音的间隔）。
+          所以圈从"上一个音那一刻"开始收、到"这个音那一刻"正好到中心 ——
+          用户：「可以把那个圆圈往内缩入的速度跟音符速度匹配」。
           对**时间**严格线性 —— 不做任何缓动。
           缓动（比如越到后面缩得越快）看着是更"有劲"，但它会让
           "还剩多久"这件事**读不出来**：你会以为圈还挺大、其实只剩
@@ -948,22 +1011,29 @@ class GridView(SheetView):
             return
 
         items = []
-        for _cells, rest, _name, start in f.timed:
+        for _cells, rest, _name, start, lead in f.timed:
             if rest:
                 continue
             left = start - self.sec
-            if left > LEAD or left < -RING_TAIL:
+            # ★ 这里用这个音**自己的** `lead`，不是全局 `LEAD` ★
+            #   判据（画不画）和下面的进度（缩到多小）必须是同一个数，
+            #   不然会出现"刚露头就已经缩了一半"或者"到点了圈还很大"。
+            if left > lead or left < -RING_TAIL:
                 continue
-            items.append((left, _cells))
+            items.append((left, _cells, lead))
         # 远的先画、近的后画：连按时小圈压在大圈上，层次一眼分得开。
         # （试过按音高排、按格子排，都不如按"还剩多久"排 —— 它本身就是
         #   "先后"这个词的定义。）
         items.sort(key=lambda kv: -kv[0])
 
-        for left, cells in items:
+        for left, cells, lead in items:
             # 进度：1 = 刚出现（最大），0 = 聚拢完成
             # ★ `+ RING_LAG` 就是那个"宁晚勿早"的补偿，见它的注释 ★
-            prog = max(0.0, min(1.0, (left + RING_LAG) / LEAD))
+            # ★ 分母用 `lead`：每个音的收缩时长跟着它自己的间隔走 ★
+            #   用户：「可以把那个圆圈往内缩入的速度跟音符速度匹配」。
+            #   快的地方（间隔 0.4 秒）圈就 0.4 秒缩完，慢的地方（2 秒）
+            #   就 2 秒缩完 —— 而"缩到中心"永远落在音开始那一刻。
+            prog = max(0.0, min(1.0, (left + RING_LAG) / lead))
             # 越接近中心越亮、越粗 —— "快了"要一眼看得出来。
             # （亮度用 alpha 而不是换个更亮的颜色：`T.PRESS` 那个亮黄在
             #   深色底上已经是最跳的了，再亮就发白、跟淡黄预告格撞色。）
