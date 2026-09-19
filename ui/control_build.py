@@ -86,7 +86,7 @@ class BuilderMixin:
             '适合：先听几遍熟悉节奏，或者照着谱子匀速过一遍。\n\n'
             '（和下面的「▶ 播放」是同一件事，只是入口放在这儿。）')
         for b in (btn_new, btn_open, btn_edit, btn_reload, btn_live):
-            b.setFixedHeight(30)
+            b.setFixedHeight(32)
             b.setIconSize(QSize(15, 15))
         row.addWidget(QLabel('曲谱仓库'))
         row.addWidget(self.cmb_sheet, 1)
@@ -509,8 +509,13 @@ class BuilderMixin:
             '删之前会问一次。列表上右键也能删。\n\n'
             '内置的示例谱面删不掉 —— 它在程序自己的目录里，\n'
             '删了下次重新打包 / 更新又回来了。')
+        # ★ 26 → 28 ★
+        #   这颗按钮的图标是 16×16，而 26px 高的按钮内容区只有
+        #   `26 − 5×2(padding) − 1×2(边框) = 14px` —— **装不下它自己的图标**，
+        #   上下各被裁掉一点。28px 之后内容区正好 16px。
+        #   （它比别处的 32px 矮，是有意的：侧栏底那一排是"小按钮"。）
         for b in (btn_dir, btn_ref, self.btn_del_sheet):
-            b.setFixedHeight(26)
+            b.setFixedHeight(28)
         brow.addWidget(btn_dir)
         brow.addWidget(btn_ref)
         brow.addWidget(self.btn_del_sheet)

@@ -493,17 +493,17 @@ class EditorDialog(QDialog):
         self.btn_play = QPushButton('从这里播')
         self.btn_play.setIcon(QIcon(appstyle.play_icon(13)))
         self.btn_play.setIconSize(QSize(13, 13))
-        self.btn_play.setFixedHeight(30)
+        self.btn_play.setFixedHeight(32)
         self.btn_play.setToolTip('从播放头开始播　（空格键也能播 / 停）')
         self.btn_stop = QPushButton('停止')
         self.btn_stop.setIcon(QIcon(appstyle.stop_icon(13)))
         self.btn_stop.setIconSize(QSize(13, 13))
-        self.btn_stop.setFixedHeight(30)
+        self.btn_stop.setFixedHeight(32)
         self.btn_stop.setToolTip('停住，播放头留在原地 —— 再按空格从这儿接着播')
         self.btn_home = QPushButton('回到开头')
         self.btn_home.setIcon(QIcon(appstyle.back_icon(13)))
         self.btn_home.setIconSize(QSize(13, 13))
-        self.btn_home.setFixedHeight(30)
+        self.btn_home.setFixedHeight(32)
         self.btn_home.setToolTip('播放头回到开头（0 秒）')
 
         # ★ 选区播放 = **循环** ★
@@ -537,7 +537,7 @@ class EditorDialog(QDialog):
         self.btn_clear_all = QPushButton('全删')
         for b in (self.btn_del_sel, self.btn_del_keep, self.btn_sel_all,
                   self.btn_clear_sel, self.btn_undo, self.btn_clear_all):
-            b.setFixedHeight(30)
+            b.setFixedHeight(32)
         self.btn_clear_all.setObjectName('danger')
 
         self.lbl_pos = QLabel('位置：0.00 秒')
