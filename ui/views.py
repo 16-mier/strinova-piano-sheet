@@ -446,11 +446,12 @@ class SheetView(QWidget):
             if rest:
                 continue                 # 休止符没有格子可画
             left = start - self.sec
-            # ★ 判据用这个音**自己的** `lead` ★
-            #   从前这里写死的是全局 `LEAD`。现在每个音的收缩时长
-            #   各不相同 —— 用错这个数的话，慢曲子会提前返回 False，
-            #   圈缩到一半就没人来重绘、**冻在屏幕上**。
-            if -RING_TAIL <= left <= lead:
+            # ★ 这个判据必须跟 `_paint_rings` / `_paint_countdown` 一致 ★
+            #   它们现在都用统一的 `LEAD` 当"出现窗口"（见那边的注释：
+            #   连按的几个圈要同时挂出来）。
+            #   这里要是还用各自的 `lead` 就会**提前返回 False** ——
+            #   屏幕上明明还挂着圈，重绘却停了，圈会**冻在半路上**。
+            if -RING_TAIL <= left <= LEAD:
                 return True
         return False
 
@@ -1024,10 +1025,28 @@ class GridView(SheetView):
             if rest:
                 continue
             left = start - self.sec
-            # ★ 这里用这个音**自己的** `lead`，不是全局 `LEAD` ★
-            #   判据（画不画）和下面的进度（缩到多小）必须是同一个数，
-            #   不然会出现"刚露头就已经缩了一半"或者"到点了圈还很大"。
-            if left > lead or left < -RING_TAIL:
+            # ★ 出现窗口用**统一的 `LEAD`**，不用各自的 `lead` ★
+            #   用户：「连点三下就显示三个，俩下俩个」。
+            #
+            #   这两件事必须分开 —— 上一轮把它们绑成了一个 `lead`，
+            #   结果连按时屏幕上永远只剩一个圈：
+            #     · **什么时候出现**（窗口）→ 统一 `LEAD`（1.2 秒）
+            #       大家都提前同样久挂出来，连按的几个圈才会**同时**
+            #       套在一起，一眼看出"这个键还要按几下"；
+            #     · **缩到中心要多久**（速度）→ 各自的 `lead`
+            #       这是 §16.58 用户要的"跟音符速度匹配"，
+            #       而且它保证"缩到中心"永远落在音开始那一刻。
+            #
+            #   绑在一起的话：连按间隔 0.6 秒 → `lead` = 0.6 →
+            #   第二个音要等到 `left ≤ 0.6` 才出现，可那会儿第一个圈
+            #   早就缩没了 —— 屏幕上一个圈，跟单音没区别。
+            #
+            #   ★ 中途那一段圈会"停在最大半径不动" ★
+            #     `left ∈ (lead, LEAD]` 时 `prog = (left+RING_LAG)/lead > 1`，
+            #     被下面那行 `min(1.0, …)` 夹住 → 半径恒等于最大值。
+            #     这不是副作用，正是要的效果：先稳稳挂着让人看清有几个圈，
+            #     最后 `lead` 秒才真的收拢。
+            if left > LEAD or left < -RING_TAIL:
                 continue
             items.append((left, _cells, lead))
         # 远的先画、近的后画：连按时小圈压在大圈上，层次一眼分得开。
@@ -1268,10 +1287,12 @@ class GridView(SheetView):
           数字要是跟圈画在一起，会被音名整块盖掉 —— 所以它跟序号角标
           同一层，由 `paintEvent` 在 `_paint_badges` 之后单独调一次。
 
-        ★ 显示范围跟圈对齐 ★
-          `left ∈ [0, lead]`：从圈出现一直到该按那一刻。
-          缩完之后（`left < 0`，也就是 `RING_TAIL` 那条尾巴）就不写了 ——
-          那时数字已经是 "0.0" 或者负数，写着反而让人以为还得再等。
+        ★ 显示范围跟圈**完全对齐** ★
+          `left ∈ [0, LEAD]`：跟 `_paint_rings` 用的是同一个窗口，
+          所以"屏幕上有几个圈，就有几个倒计时"。
+          用户：「全部需要显示的都要有倒计时」——
+          要是这里还用各自的 `lead`，连按时就会只有最近那个音有数字，
+          套在外面的几个圈光秃秃的。
 
         ★ 格式 `%.1f` ★
           一位小数就是这套提示的分辨率：`set_time` 是 8 ms 一跳，
@@ -1279,19 +1300,32 @@ class GridView(SheetView):
         """
         if not f.blinking or f.cell <= 10.0:
             return
+
+        # ★ 同一个格子上可能有好几个圈（连按）—— 数字得竖着排开 ★
+        #   用户：「连点三下就显示三个……而且全部需要显示的都要有倒计时」。
+        #   三个**圈**套在一起没问题（同心，本来就该这样），
+        #   但三个**数字**都挤在右上角就是一团黑，一个都读不出来。
+        #   所以先按格子分组，组内按"离得最近的排最上面"从上往下排。
+        by_cell: dict[tuple[int, int], list[float]] = {}
         for _cells, rest, _name, start, lead in f.timed:
             if rest:
                 continue
             left = start - self.sec
-            if left < 0.0 or left > lead:
+            if left < 0.0 or left > LEAD:
                 continue
-            txt = '%.1f' % left
-            for (row, col) in _cells:
-                r = self._cell_rect(f, row, col)
-                bw = max(26.0, f.cell * 0.34)
-                bh = max(16.0, f.cell * 0.20)
+            for cell in _cells:
+                by_cell.setdefault(cell, []).append(left)
+
+        for (row, col), lefts in by_cell.items():
+            lefts.sort()
+            r = self._cell_rect(f, row, col)
+            bw = max(26.0, f.cell * 0.34)
+            bh = max(16.0, f.cell * 0.20)
+            gap = max(2.0, f.cell * 0.022)
+            for i, left in enumerate(lefts):
                 box = QRectF(r.right() - bw - f.cell * 0.04,
-                             r.top() + f.cell * 0.04, bw, bh)
+                             r.top() + f.cell * 0.04 + i * (bh + gap),
+                             bw, bh)
                 # 深色圆角底 —— 数字得同时压在淡黄预告底、深橄榄当前底、
                 # 青色闪光上都看得清，光靠字色做不到。
                 p.setPen(Qt.PenStyle.NoPen)
@@ -1300,7 +1334,7 @@ class GridView(SheetView):
                 p.setPen(QPen(QColor(T.PRESS.red(), T.PRESS.green(),
                                      T.PRESS.blue())))
                 p.setFont(_fit_font(bh * 0.66, bold=True))
-                p.drawText(box, Qt.AlignmentFlag.AlignCenter, txt)
+                p.drawText(box, Qt.AlignmentFlag.AlignCenter, '%.1f' % left)
 
     # -- 两层闪光 --
 
