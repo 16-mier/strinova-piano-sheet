@@ -921,8 +921,51 @@ class GridView(SheetView):
         _fill = T.UPCOMING[idx]
         return (_fill, _fill.lighter(125), _txt_for(_fill), 0.0)
 
+    def _pressure(self, f: _Frame, cell) -> float:
+        """「正要点下去」那一格的**紧迫度**：0 = 刚轮到它，1 = 就是现在。
+
+        用户：「正要点下去那个按键不够明显，然后你看看有没有什么办法
+        改的更直观，跟音游一样」。
+
+        ★ 音游抓眼的从来不是**颜色**，是**颜色在动** ★
+          音符往下落、判定圈往里收 —— 眼睛是被"变化"拽过去的。
+          静态那一格再深一点、再亮一点，效果都不如让它"活"起来。
+          所以这一层不改底色（用户当初要的是"不刺眼"，见
+          `theme.ACTIVE` 的注释），只算一个 0→1 的数，
+          由 `_paint_cells` 拿它去驱动**边宽和亮度**：
+          轮廓一直在涨，涨到你按下去为止。
+
+        ★ 返回值可以超过 1 ★
+          `left < 0`（已经到点、正在收尾巴）时返回 1~2 ——
+          那是"命中"那一下，用来看得更清楚（见那边的爆发环）。
+          夹在 [0, 2] 里，别让它无限涨。
+
+        ★ 找不到就返回 0 ★
+          休止符、或者这一格压根不在 `f.timed` 里（比如只是预告格），
+          都不是"正要点下去"的那一格。
+        """
+        for cells, rest, _name, start, lead in f.timed:
+            if rest or cell not in cells:
+                continue
+            left = start - self.sec
+            if left > lead:
+                return 0.0               # 还没轮到它（圈都还没开始收）
+            if left >= 0.0:
+                # 越接近 0 越接近 1。分母用 `lead` 而不是固定值，
+                # 快曲子涨得快、慢曲子涨得慢 —— 跟圈的收缩同一个节奏。
+                return max(0.0, 1.0 - left / max(0.15, lead))
+            # 到点之后：0 → -RING_TAIL 映射成 1 → 2
+            return 1.0 + min(1.0, -left / RING_TAIL)
+        return 0.0
+
     def _paint_cells(self, p: QPainter, f: _Frame):
-        """格子的底色和边 —— 只有这两样，文字在 `_paint_labels` 里另画。"""
+        """格子的底色和边 —— 只有这两样，文字在 `_paint_labels` 里另画。
+
+        ★ 「正要点下去」那一格多一层"压迫感" ★
+          见 `_pressure()`：底色不动，但**边会随时间涨粗涨亮**，
+          到点那一下再爆一圈。用户要的"跟音游一样"就是这层动态 ——
+          静态的深橄榄色再怎么调都不够跳。
+        """
         for row in range(4):
             for col in range(4):
                 ranks = f.orders.get((row, col)) or []
@@ -931,6 +974,44 @@ class GridView(SheetView):
                                                            (row, col))
                 hot = rank == 0 and f.blinking
                 r = self._cell_rect(f, row, col, inset)
+                k = self._pressure(f, (row, col)) if hot else 0.0
+
+                if k > 1.0:
+                    # ★ 命中那一下：一圈快速往外扩的环 ★
+                    #   音游里"打中了"都有一记明确的爆发，不然按对了也没感觉。
+                    #   用 `left` 直接算扩散进度（1 → 2 对应 0 → RING_TAIL），
+                    #   不需要额外的动画状态 —— 时间本身就是进度条。
+                    trip = k - 1.0
+                    halo = r.adjusted(-r.width() * 0.20 * trip,
+                                      -r.height() * 0.20 * trip,
+                                      r.width() * 0.20 * trip,
+                                      r.height() * 0.20 * trip)
+                    c = QColor(T.PRESS)
+                    c.setAlpha(int(170 * (1.0 - trip)))
+                    p.setPen(QPen(self._dim(c), 5.0 * (1.0 - trip) + 1.0))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawRoundedRect(halo, T.RADIUS * 1.6, T.RADIUS * 1.6)
+                elif k > 0.0:
+                    # ★ 逼近：边越来越粗、越来越亮 ★
+                    #   3 → 8 px、alpha 120 → 255。上限 8 是量过的：
+                    #   再粗就压到格子里的字了（格子 107px，字占中间 40px）。
+                    #
+                    #   ★ 浅底上得先垫一圈深色 ★
+                    #     连按的当前格底色是淡黄 —— 亮黄边压上去等于没画，
+                    #     跟 `_paint_rings` 那边同一个道理、同一个阈值。
+                    wide = 3.0 + 5.0 * k
+                    if fill.lightness() >= 140:
+                        p.setPen(QPen(QColor(26, 20, 4, int(200 * k + 40)),
+                                      wide + 3.0))
+                        p.setBrush(Qt.BrushStyle.NoBrush)
+                        p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
+                    edge_c = QColor(T.PRESS)
+                    edge_c.setAlpha(int(120 + 135 * k))
+                    p.setPen(QPen(self._dim(edge_c), wide))
+                    p.setBrush(QBrush(self._dim(fill)))
+                    p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
+                    continue
+
                 p.setPen(QPen(self._dim(edge), 3 if hot else 1.5))
                 p.setBrush(QBrush(self._dim(fill)))
                 p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
