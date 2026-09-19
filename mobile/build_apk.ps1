@@ -16,7 +16,25 @@ param(
     [switch]$Release
 )
 
-$ErrorActionPreference = 'Stop'
+# ★ 这里**不能**用 'Stop' ★
+#   这个脚本从头到尾都在调外部程序（java / npx / gradlew），而它们
+#   很多信息是往 **stderr** 写的 —— PowerShell 5.1 会把 native command
+#   的 stderr 包装成 ErrorRecord，`ErrorActionPreference = 'Stop'`
+#   一看见就**直接把脚本掐掉**。
+#
+#   最典型的是 `java -version`：它把版本号打到 stderr（Java 的老传统），
+#   于是脚本在"检查 JDK"这一步就无声无息地退出，后面什么都不跑，
+#   只留下一条看着像报错的版本号。
+#
+#   改成 'Continue'，每一步**自己查 `$LASTEXITCODE`** ——
+#   对调外部程序的脚本来说这才是对的写法。
+$ErrorActionPreference = 'Continue'
+
+function Fail($msg) {
+    Write-Host ""
+    Write-Host "★ $msg" -ForegroundColor Red
+    exit 1
+}
 
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $Tools = Join-Path (Split-Path -Parent $Root) '_android_tools'
@@ -31,6 +49,33 @@ if (-not $SdkRoot) { $SdkRoot = Join-Path $Tools 'sdk' }
 if (-not (Test-Path "$JdkRoot\bin\java.exe")) {
     throw "没找到 JDK。用 -JdkRoot 指定，或者检查 $Tools\jdk"
 }
+
+# ★ 光看文件在不在是不够的 ★
+#   真出过事：一次解压中途被打断（防病毒实时扫描锁住了刚写出来的 .exe），
+#   JDK 目录**结构完整、内容半残** —— `javac.exe` 还在、`java.exe` 没了、
+#   `lib/modules` 缺了几块。只看目录的话会一路走到 Gradle 才报一句
+#   看不懂的错。所以这里真的把 java 跑一下。
+#
+#   （修的办法：`tar -xf` 解压到一个**全新空目录**。`Expand-Archive -Force`
+#     会先尝试删掉已有的同名文件，而那些文件正被扫描锁着 ——
+#     于是删除失败、覆盖也失败，留下的就是混合状态。
+#     `tar` 没这个"先删后写"的阶段，稳得多。）
+#
+# ★ 顺序有讲究：先存 LASTEXITCODE，再用管道 ★
+#   `java -version` 把版本号打到 **stderr**，所以要 `2>&1` 才收得到。
+#   但**不能**写成 `(& java -version 2>&1 | Select-Object -First 1)` ——
+#   `Select-Object -First 1` 拿到第一项后会**掐断上游管道**，
+#   被中断的原生命令退出码变成 **-1**，于是这里误报"JDK 起不来"，
+#   而 JDK 明明是好的（实测：直接调是 0，套上那个管道就成了 -1）。
+Remove-Item Env:\JAVA_TOOL_OPTIONS -ErrorAction SilentlyContinue
+$jvOut = & "$JdkRoot\bin\java.exe" -version 2>&1
+$jvCode = $LASTEXITCODE
+$jv = ($jvOut | Select-Object -First 1) -join ''
+if ($jvCode -ne 0 -or [string]::IsNullOrEmpty($jv)) {
+    Fail "JDK 起不来（$JdkRoot 里那份可能坏了，或者 JAVA_TOOL_OPTIONS 在捣乱）。"
+}
+Write-Host "Java       : $jv"
+
 if (-not (Test-Path "$SdkRoot\platforms\android-34\android.jar")) {
     throw "没找到 Android SDK（缺 platform-34）。用 -SdkRoot 指定，或者检查 $Tools\sdk"
 }

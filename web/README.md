@@ -83,12 +83,53 @@ JDK 17 不认它 —— 报 `Unrecognized VM option`，然后 Gradle 说找不�
 阴险的地方是 `java -version` 单独跑**看着是好的**，只有带参数跑才炸。
 脚本里第一件事就是 `Remove-Item Env:\JAVA_TOOL_OPTIONS`。
 
-**2. Gradle 首次构建要下约 1.8 GB**（Gradle 本体 + Android 依赖），
+**2. 解压 JDK 别用 `Expand-Archive -Force`。**
+它会**先尝试删掉已有的同名文件**，而那些文件可能正被防病毒实时扫描锁着
+（刚写出来的 `.exe` 最容易中招）—— 删除失败、覆盖也失败，
+留下一个**结构完整但内容半残**的 JDK：`javac.exe` 还在、`java.exe` 没了。
+
+用 `tar -xf 包.zip -C 空目录`。它没有"先删后写"那个阶段，
+实测在同一台机器上一次过。脚本里还加了一句真的 `java -version` ——
+光看目录在不在是抓不住这种半残状态的。
+
+**3. `Select-Object -First 1` 会掐断管道、改坏 `$LASTEXITCODE`。**
+写 JDK 检查时我写成了：
+
+```powershell
+$jv = (& java.exe -version 2>&1 | Select-Object -First 1) -join ''
+if ($LASTEXITCODE -ne 0) { ... }     # ← 这里永远是 -1，误报
+```
+
+`java -version` 把版本打到 **stderr** 所以要 `2>&1`，而
+`Select-Object -First 1` 拿到第一项后会**掐断上游管道**，
+被中断的原生命令退出码变成 **-1**。实测：直接调是 `0`，套上管道是 `-1`。
+
+正确顺序是**先存再管道**：
+
+```powershell
+$jvOut = & java.exe -version 2>&1
+$jvCode = $LASTEXITCODE          # ← 先存下来
+$jv = ($jvOut | Select-Object -First 1) -join ''
+```
+
+**4. 这个 `.ps1` 必须带 UTF-8 BOM。**
+Windows PowerShell 5.1 读**没有 BOM** 的文件时会按系统 ANSI 码页
+（中文机器上是 GBK）解码 —— 中文全变乱码、字符串里的引号被吃掉，
+报出来的是莫名其妙的「Try 语句缺少 Catch 或 Finally」。
+`pwsh`（PowerShell 7）默认按 UTF-8 读，所以这个坑只在 5.1 上出现，
+而用户双击 `.ps1` 用的就是 5.1。
+
+**5. Gradle 首次构建要下约 1.8 GB**（Gradle 本体 + Android 依赖），
 耗时十几分钟。之后就快了（增量 20 秒左右）。
 
-**3. `cap sync` 必须重新跑。**
+**6. `cap sync` 必须重新跑。**
 改了 `web/` 里的东西之后，不 sync 的话 APK 里还是旧的 ——
 `web/` 是源，`android/app/src/main/assets/public/` 是 `cap sync` 拷过去的副本。
+
+**7. JDK 从清华镜像下快得多。**
+官方 API（`api.adoptium.net`）那次下了 **18 分钟**还超时了，
+清华的 `mirrors.tuna.tsinghua.edu.cn/Adoptium/17/jdk/x64/windows/`
+**5 秒**下完同一个文件（182 MB）。
 
 ## 还能用浏览器直接开
 
