@@ -1061,8 +1061,13 @@ class ControlWindow(BuilderMixin, QMainWindow):
         want = self._train_seq[i]
         if pitch == want:
             self._train_i += 1
-            # 点对了让那一格自己闪一下（跟打击垫同一套反馈）
-            self.train.grid.set_flash(pitch, 0.25, min_gap=0.02)
+            # 点对了让那一格自己闪一下（跟打击垫同一套反馈）。
+            # ★ 时长 0.15 秒，比演奏时的 0.25 短 ★
+            #   用户：「点按下去变成青色要改成闪烁，不然会覆盖」——
+            #   训练是**一格一格点**的，点完马上就要看下一格；
+            #   闪光拖太久，眼睛还没离开上一格，下一格已经亮起来了。
+            #   短促一点，是"啪"的一下，不是"染上一层色"。
+            self.train.grid.set_flash(pitch, 0.15, min_gap=0.02)
             self._train_refresh()
             if self._train_i >= n:
                 self.overlay.show_toast('训练完成：一共 %d 个音' % n, 2.5)

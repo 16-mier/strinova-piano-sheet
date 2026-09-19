@@ -1721,12 +1721,27 @@ class GridView(SheetView):
         ★ 位置由 `_flash_marks()` 算 ★
           它用 `_geom()` 而不是 `_frame()`，所以没谱面 / 演奏结束时
           照样闪 —— 见那个方法的注释。
+
+        ★ 只描边，**不填充** ★
+          用户：「练习模式里面点按下去变成青色要改成闪烁，不然会覆盖」。
+
+          原来这里有一句 `setBrush(...)`（半透明青色），一整格都被罩住 ——
+          底下的预告格深色、序号角标、角标里的数字全被压掉。
+          那不叫"闪烁"，那叫"这一格换了个颜色"，而且换完还盖着别的东西。
+
+          现在只留**两圈边**：外面一圈更粗更淡（当光晕），
+          里面一圈细而实（当轮廓）。闪的时候一眼看得出"这一格刚被按了"，
+          但格子本身长什么样、角标写着几，一点没被挡。
         """
         for r, k in self._flash_marks():
-            p.setPen(QPen(QColor(T.HIT.red(), T.HIT.green(), T.HIT.blue(),
-                                 int(210 * k + 45)), 4.0))
-            p.setBrush(QBrush(QColor(T.HIT.red(), T.HIT.green(),
-                                     T.HIT.blue(), int(170 * k + 30))))
+            c = QColor(T.HIT.red(), T.HIT.green(), T.HIT.blue(),
+                       int(230 * k + 25))
+            glow = QColor(T.HIT.red(), T.HIT.green(), T.HIT.blue(),
+                          int(90 * k))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(glow, 9.0))
+            p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
+            p.setPen(QPen(c, 3.0))
             p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
 
     # -- 底部提示 --
