@@ -520,6 +520,35 @@ def build_qss() -> str:
     arrow_down_hi = _arrow_icon(ACCENT_HI, 8)
 
     return """
+/* ==========================================================================
+   ★ 尺寸体系（改样式之前先读这一段）★
+
+   圆角只有五档，按"这东西有多大"选，别再随手写新数字：
+
+     4px   细长条    滑块轨道、勾选框方块
+     6px   小元素    列表项、菜单项、下拉项、滚动条把手
+     8px   控件      按钮、输入框、下拉框、数字框、气泡提示
+     10px  浮层      菜单、列表（它们浮在面板上，比控件大一圈）
+     12px  容器      分组框、滚动区域
+
+   （原来一共攒了八档：3/4/5/6/7/8/9/10 —— 同一个 `QPushButton`
+     还有 7 和 9 两个值。差 1px 肉眼根本看不出来，但读代码的人会
+     以为那里有讲究，然后照着再写一个新数字出来。）
+
+   控件高度一律 **32px**：
+     按钮     padding 5px 14px + min-height 20px + 边框 1px×2
+     下拉框   padding 5px 10px + min-height 20px + 边框 1px×2
+     数字框   padding 5px  8px + min-height 20px + 边框 1px×2
+     输入框   padding 5px  8px + min-height 20px + 边框 1px×2
+
+   水平内边距各按内容宽度定（按钮宽一点才好点），**垂直的必须一样** ——
+   它们并排或者同列的时候才对得齐。改任意一处之前先算一遍：
+   高度 = min-height + 垂直padding×2 + 边框×2。
+
+   （`QPushButton#bar` 是唯一的例外：浮窗控制条上那几颗是 28×22 的
+     方块，padding 和 min-height 都必须归零，理由见那边的注释。）
+   ========================================================================== */
+
 /* ============ 全局 ============ */
 QWidget {
     color: %(TEXT)s;
@@ -541,7 +570,7 @@ QToolTip {
     background-color: %(PANEL_HI)s;
     color: %(TEXT)s;
     border: 1px solid %(EDGE_HI)s;
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 5px 8px;
 }
 
@@ -571,7 +600,7 @@ QLabel#accent {
 QGroupBox {
     background-color: %(GROUP)s;
     border: 1px solid %(EDGE)s;
-    border-radius: 10px;
+    border-radius: 12px;
     margin-top: 16px;
     padding: 14px 14px 12px 14px;
     font-weight: 600;
@@ -586,12 +615,50 @@ QGroupBox::title {
     background-color: %(WINDOW)s;
 }
 
+/* ============ 面板（Premiere 那种分区）============ */
+/* ★ 为什么还要单独做一套，不用现成的 QGroupBox ★
+   `QGroupBox::title` 是个**子控件**，它的宽度只到文字 —— QSS 的子控件
+   没有"撑满整块宽度"这种写法，所以"标题栏横贯整条"根本写不出来。
+
+   （★ 这段注释躺在"百分号格式化"的模板字符串里，**里面不能出现孤立的
+     百分号**，要写就得写两个。我第一版就是随手写了个百分号，
+     `build_qss()` 当场抛 "unsupported format character" ——
+     主题整个装不上，界面悄悄退回系统默认配色。
+     ruff 的 F509 抓到了它。
+     后来加注释说明这件事的时候又写了一个 —— 所以有了
+     `tools/scan_qss_percent.py`。）
+
+   而 Premiere / 达芬奇那类剪辑软件的面板恰恰就是那个样子：
+   顶上一条实心标题栏横贯整条，内容明确待在下面。
+   用户要的分区感就是它（原话「可以和PR的轨道一样啊」）。
+
+   所以用一个 QFrame + 一个 QLabel 搭（见 `ui/panel.py`）。
+   `QGroupBox` 自己那几条样式**留着** —— 控制台那边还在用。 */
+QFrame#panel {
+    background-color: %(GROUP)s;
+    border: 1px solid %(EDGE)s;
+    border-radius: 12px;
+}
+QLabel#panelTitle {
+    background-color: %(PANEL_HI)s;
+    color: %(TEXT)s;
+    font-weight: 600;
+    padding: 8px 12px;
+    /* 圆角比外框小 1px —— 外框的边框占掉 1px，不跟着减会露出底色 */
+    border-top-left-radius: 11px;
+    border-top-right-radius: 11px;
+    border-bottom: 1px solid %(EDGE)s;
+}
+QWidget#panelBody {
+    background: transparent;
+}
+
 /* ============ 按钮 ============ */
 QPushButton {
     background-color: %(PANEL_HI)s;
     color: %(TEXT)s;
     border: 1px solid %(EDGE)s;
-    border-radius: 7px;
+    border-radius: 8px;
     padding: 5px 14px;
     min-height: 20px;
 }
@@ -705,7 +772,11 @@ QPushButton#record {
     color: #c9d3ea;
     font-weight: 600;
     font-size: 11pt;
-    border-radius: 9px;
+    border-radius: 8px;
+    /* ★ 原来是 9px —— 同一个控件类比别人多 2px ★
+       它是 `QPushButton` 的特例，圆角不该跟着一起变特殊：
+       跟普通按钮差 1px 肉眼看不出来，但读代码的人会以为这里
+       有什么讲究。并进 8px。 */
     padding: 8px 16px;
 }
 QPushButton#record:hover {
@@ -740,8 +811,13 @@ QLineEdit, QPlainTextEdit, QTextEdit {
     background-color: %(INPUT)s;
     color: %(TEXT)s;
     border: 1px solid %(EDGE)s;
-    border-radius: 7px;
+    border-radius: 8px;
     padding: 5px 8px;
+    /* ★ 补上 min-height，让三种输入控件一样高 ★
+       原来只有 `QComboBox` / `QSpinBox` 写了 `min-height: 20px`
+       （= 32px 高），`QLineEdit` 没写，高度就跟着字体行高走 ——
+       它们**并排或者同列**的时候，起始的 x 和整体高度都对不齐。 */
+    min-height: 20px;
 }
 QLineEdit:hover, QPlainTextEdit:hover, QTextEdit:hover {
     border-color: %(EDGE_HI)s;
@@ -758,8 +834,11 @@ QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled {
 QComboBox {
     background-color: %(PANEL_HI)s;
     border: 1px solid %(EDGE)s;
-    border-radius: 7px;
-    padding: 4px 10px;
+    border-radius: 8px;
+    /* ★ 垂直内边距 4 → 5 ★
+       4px 时总高 = 20 + 8 + 2 = 30，而按钮是 32 —— 并排放的时候
+       下拉框比按钮矮 2px，底边对不齐。改成 5 之后两边都是 32。 */
+    padding: 5px 10px;
     min-height: 20px;
 }
 QComboBox:hover {
@@ -795,7 +874,7 @@ QComboBox::down-arrow:disabled {
 QComboBox QAbstractItemView {
     background-color: %(PANEL)s;
     border: 1px solid %(EDGE_HI)s;
-    border-radius: 7px;
+    border-radius: 8px;
     padding: 4px;
     outline: none;
     selection-background-color: %(SEL_BG)s;
@@ -803,7 +882,7 @@ QComboBox QAbstractItemView {
 QComboBox QAbstractItemView::item {
     min-height: 22px;
     padding: 2px 8px;
-    border-radius: 5px;
+    border-radius: 6px;
 }
 QComboBox QAbstractItemView::item:hover {
     background-color: %(PANEL_HI)s;
@@ -858,12 +937,12 @@ QSlider::groove:horizontal {
     height: 5px;
     background-color: %(INPUT)s;
     border: 1px solid %(EDGE)s;
-    border-radius: 3px;
+    border-radius: 4px;
 }
 QSlider::sub-page:horizontal {
     background-color: %(ACCENT_DIM)s;
     border: 1px solid %(ACCENT_DIM)s;
-    border-radius: 3px;
+    border-radius: 4px;
 }
 QSlider::handle:horizontal {
     background-color: %(ACCENT)s;
@@ -927,7 +1006,7 @@ QScrollBar::add-page, QScrollBar::sub-page {
 QScrollArea {
     background-color: %(PANEL)s;
     border: 1px solid %(EDGE)s;
-    border-radius: 10px;
+    border-radius: 12px;
 }
 QScrollArea > QWidget > QWidget {
     background-color: transparent;
@@ -940,7 +1019,7 @@ QAbstractScrollArea::corner {
 QListWidget, QListView, QTreeWidget, QTreeView {
     background-color: %(INPUT)s;
     border: 1px solid %(EDGE)s;
-    border-radius: 8px;
+    border-radius: 10px;
     padding: 4px;
     outline: none;
     alternate-background-color: %(PANEL)s;
@@ -963,8 +1042,8 @@ QListWidget::item:selected, QListView::item:selected, QTreeWidget::item:selected
 QSpinBox, QDoubleSpinBox {
     background-color: %(INPUT)s;
     border: 1px solid %(EDGE)s;
-    border-radius: 7px;
-    padding: 4px 6px;
+    border-radius: 8px;
+    padding: 5px 8px;
     min-height: 20px;
     selection-background-color: %(SEL_BG)s;
 }
@@ -1013,7 +1092,7 @@ QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
 QMenu {
     background-color: %(PANEL)s;
     border: 1px solid %(EDGE_HI)s;
-    border-radius: 8px;
+    border-radius: 10px;
     padding: 5px;
 }
 QMenu::item {

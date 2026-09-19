@@ -21,11 +21,12 @@ from __future__ import annotations
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDockWidget, QFormLayout, QGroupBox, QHBoxLayout,
+    QCheckBox, QComboBox, QDockWidget, QFormLayout, QHBoxLayout,
     QLabel, QListWidget, QPushButton, QSlider, QSpinBox,
     QVBoxLayout, QWidget)
 from . import appstyle
 from .hotkeys import HotkeyEdit
+from .panel import PanelBox
 
 
 class BuilderMixin:
@@ -48,8 +49,8 @@ class BuilderMixin:
         box.setSpacing(10)
 
         # ---------- 谱面 ----------
-        g_sheet = QGroupBox('谱面')
-        f = QVBoxLayout(g_sheet)
+        g_sheet = PanelBox('谱面')
+        f = g_sheet.inner
 
         row = QHBoxLayout()
         self.cmb_sheet = QComboBox()
@@ -86,7 +87,7 @@ class BuilderMixin:
             '适合：先听几遍熟悉节奏，或者照着谱子匀速过一遍。\n\n'
             '（和下面的「▶ 播放」是同一件事，只是入口放在这儿。）')
         for b in (btn_new, btn_open, btn_edit, btn_reload, btn_live):
-            b.setFixedHeight(30)
+            b.setFixedHeight(32)
             b.setIconSize(QSize(15, 15))
         row.addWidget(QLabel('曲谱仓库'))
         row.addWidget(self.cmb_sheet, 1)
@@ -114,8 +115,8 @@ class BuilderMixin:
         box.addWidget(g_sheet)
 
         # ---------- 播放 ----------
-        g_play = QGroupBox('播放')
-        fp = QVBoxLayout(g_play)
+        g_play = PanelBox('播放')
+        fp = g_play.inner
 
         prow = QHBoxLayout()
         # ★ 这三颗按钮的图标是自己画的，不是 ▶ / ⏹ / ⏮ 三个字符 ★
@@ -206,8 +207,15 @@ class BuilderMixin:
         #   那两条走的是 `ui/overlay.py::Player`（本地听），
         #   跟"送到虚拟声卡"是两回事。
         # ---------- 显示 ----------
-        g_view = QGroupBox('显示')
-        fv = QFormLayout(g_view)
+        g_view = PanelBox('显示')
+        # ★ 不能写成 `QFormLayout(g_view)` ★
+        #   那是"把 layout 装到 g_view 自己身上" —— 而 `PanelBox`
+        #   已经有一个外层 layout 在管标题条和内容区了。
+        #   一个 widget 只能有一个 layout，硬塞会把它挤掉
+        #   （Qt 会打一句 warning，然后标题条消失）。
+        #   所以先建一个"没有爹"的 layout，再挂到内容区上。
+        fv = QFormLayout()
+        g_view.inner.addLayout(fv)
 
         self.sp_preview = QSpinBox()
         # ★ 上限从 12 收到 5 ★
@@ -280,8 +288,8 @@ class BuilderMixin:
         box.addWidget(g_view)
 
         # ---------- 悬浮窗 ----------
-        g_pos = QGroupBox('谱面窗位置与大小')
-        fg = QVBoxLayout(g_pos)
+        g_pos = PanelBox('谱面窗位置与大小')
+        fg = g_pos.inner
 
         # ★ X / Y / 宽 / 高 四个数字框拿掉了 ★
         #   用户：「浮窗的 X/Y/宽/高 + 微调按钮」清理掉。
@@ -509,8 +517,13 @@ class BuilderMixin:
             '删之前会问一次。列表上右键也能删。\n\n'
             '内置的示例谱面删不掉 —— 它在程序自己的目录里，\n'
             '删了下次重新打包 / 更新又回来了。')
+        # ★ 26 → 28 ★
+        #   这颗按钮的图标是 16×16，而 26px 高的按钮内容区只有
+        #   `26 − 5×2(padding) − 1×2(边框) = 14px` —— **装不下它自己的图标**，
+        #   上下各被裁掉一点。28px 之后内容区正好 16px。
+        #   （它比别处的 32px 矮，是有意的：侧栏底那一排是"小按钮"。）
         for b in (btn_dir, btn_ref, self.btn_del_sheet):
-            b.setFixedHeight(26)
+            b.setFixedHeight(28)
         brow.addWidget(btn_dir)
         brow.addWidget(btn_ref)
         brow.addWidget(self.btn_del_sheet)
