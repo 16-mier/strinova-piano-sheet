@@ -35,10 +35,20 @@ preview_*.png
 shot_*.png
 eval_drift.png
 
-# ---- 音频样本（体积大，而且要本地生成）----
+# ---- 音频样本 ----
+#  ★ `assets/notes/` 那 16 个音源**要**进仓库 ★（2026-09 用户定的）
+#    理由：打包版和源码版必须同一个音色，别人 clone 下来也该听到一样的。
+#    它们是从卡拉彼丘 `.pck` 里提取出来的音频（见 DEVELOPMENT.md §7），
+#    §16.56 一度判为"不公开分发"摘掉了，§16.61 用户看过风险之后决定放回来。
+#  ★ 另外三套不进 ★
+#    `notes_raw/`（QOA 原始块）、`notes_game/`（同一批采样的另一种导出）、
+#    `notes_synth/`（合成音的中间产物）—— 程序一行都不读，
+#    纯属开发期素材。真正在用的是 `notes/` 那一套。
 assets/notes_raw/
 assets/notes_game/
+assets/notes_synth/
 *.wav
+!assets/notes/*.wav
 
 # ---- 编辑器 / 系统 ----
 .vscode/
