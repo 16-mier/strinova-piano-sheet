@@ -29,7 +29,8 @@ from core.edit_model import SPB, EdNote, EditModel, pitch_order
 from . import appstyle, theme as T
 from .edit_player import EditPlayer
 from .keypad import KeyPad
-from .timeline_edit import LANES, ROW_H, RULER_H, TimelineEditor
+from .timeline_edit import (LANES, LANES_MAX, ROW_H, RULER_H,
+                            TimelineEditor)
 
 # ★ 示例谱面也用新格式 ★（老写法虽然还认，但示例没必要教旧的）
 SAMPLE = """小星星
@@ -212,6 +213,30 @@ class EditorDialog(QDialog):
         #     `tools/test_editor_chord.py` 这类直接构造对话框的入口
         #     也能拿到同一套外观。）
         appstyle.apply(QApplication.instance())
+
+        # ★ 让它能最小化到任务栏 ★
+        #   用户：「控制台和琴谱器开启的时候俩个都能任意一个挂载后台」——
+        #   两个都开着的时候，想先把哪一个收起来都行，回头再点回来。
+        #
+        #   ★ QDialog 默认**没有**最小化按钮 ★
+        #     Qt 给对话框的默认窗口标志是
+        #     `Dialog | WindowTitleHint | WindowCloseButtonHint` ——
+        #     标题栏上只有关闭。所以显式补一个
+        #     `WindowMinimizeButtonHint`。
+        #     （控制台那边不用动：它是 `QMainWindow`，本来就带。）
+        #
+        #   ★ 必须在这儿设，不能等显示之后再设 ★
+        #     窗口一旦 show 出来，`setWindowFlags()` 会把它**藏起来**
+        #     （Qt 的已知行为：改标志要重建原生窗口）。
+        #     构造期间设没有这个副作用 —— 那会儿还没 show。
+        #
+        #   ★ 它是非模态的，最小化不会冻住控制台 ★
+        #     `control.py` 里特意用 `setModal(False)` + `show()`
+        #     （见那段注释：模态会把控制台整个冻住）。
+        #     所以收起哪一个都不影响另一个照常干活。
+        self.setWindowFlags(self.windowFlags()
+                            | Qt.WindowType.WindowMinimizeButtonHint)
+
         self.path = path
         self.saved = False
         self.model: EditModel | None = None
@@ -330,6 +355,29 @@ class EditorDialog(QDialog):
             '勾上之后，在下面轨道上点一下音符方块就出声 ——\n'
             '改谱子的时候随手确认一下这个音对不对，不用按播放。')
         drag_row.addWidget(self.chk_preview)
+
+        # ★ 「12 轨」开关 ★
+        #   用户：「这里面新增一个按钮开启 12 轨，正常 6 轨」。
+        #   时间轴原来是**固定 6 条**自由轨道（`timeline_edit.LANES`）——
+        #   方块挤得厉害的时候就摊不开了，只能叠着。
+        #   现在 6 是默认值，这颗按钮负责铺到 12 条。
+        #
+        #   ★ 为什么是按钮不是复选框 ★
+        #     这一行已经三个复选框了，再来一个分不出来；
+        #     而且它切换的是"整个时间轴的形状"，不是某个行为开关。
+        #     做成可勾选的按钮，按下去是凹的、一眼看得出换了模式。
+        #
+        #   ★ 放在这一行是为了不占新高度 ★
+        #     这一列已经很挤（见下面 `lbl_pad` 那段注释）。
+        self.btn_lanes = QPushButton('12 轨')
+        self.btn_lanes.setCheckable(True)
+        self.btn_lanes.setObjectName('bar')     # 借控制条那颗小按钮的尺寸规则
+        self.btn_lanes.setToolTip(
+            '不按（默认）：时间轴 6 条轨道。\n'
+            '按下去：铺 12 条 —— 方块时间上叠得厉害时能摊得更开。\n'
+            '（切回 6 轨时，原来摆在第 7~12 轨上的方块会被收拢到第 6 轨。）')
+        self.btn_lanes.toggled.connect(self._on_lanes_toggled)
+        drag_row.addWidget(self.btn_lanes)
         drag_row.addStretch(1)
         pb.addLayout(drag_row)
 
@@ -805,6 +853,35 @@ class EditorDialog(QDialog):
                 return self._tl_cache
             self._tl_dirty = False
         return self._tl_cache
+
+    # ---------------- 轨道数 ----------------
+
+    def _on_lanes_toggled(self, on: bool):
+        """「12 轨」按钮 —— 切轨道数，顺手把滚动区高度跟着改。
+
+        用户：「这里面新增一个按钮开启 12 轨，正常 6 轨」。
+
+        ★ 高度必须跟着改，不然等于没切 ★
+          `tl_scroll.setMinimumHeight()` 是按 `轨数 × ROW_H` 算的。
+          轨数翻倍而高度不动的话，下面那 6 条会被滚动区裁掉 ——
+          用户按了按钮，看到的还是 6 条，只会以为按钮坏了。
+          （滚动区本身能滚，但"能滚"和"一眼看到"是两回事：
+           这里要的是铺开，不是让用户去滚。）
+
+        ★ 切小的时候音符会被收拢 ★
+          见 `TimelineEditor.set_lanes()`：落在 7~12 轨的方块会被压到
+          第 6 轨，不然它们会落到轨道区外面、画不出来也点不到。
+        """
+        n = LANES_MAX if on else LANES
+        if not self.tl_edit.set_lanes(n):
+            return                       # 轨数没变（比如本来就是这个数）
+        self.tl_scroll.setMinimumHeight(RULER_H + n * ROW_H + 24)
+        self.btn_lanes.setToolTip(
+            ('现在是 12 轨（点一下收回 6 轨）\n'
+             '切回 6 轨时，第 7~12 轨上的方块会被收拢到第 6 轨。' if on else
+             '不按（默认）：时间轴 6 条轨道。\n'
+             '按下去：铺 12 条 —— 方块时间上叠得厉害时能摊得更开。\n'
+             '（切回 6 轨时，原来摆在第 7~12 轨上的方块会被收拢到第 6 轨。）'))
 
     # ---------------- 拖动偏好 ----------------
 

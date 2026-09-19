@@ -60,7 +60,13 @@ def test_out_of_range_is_clamped():
     assert cfg['opacity'] == 100
     assert cfg['w'] == 180               # 下界
     assert cfg['x'] == -4000
-    assert cfg['preview'] == 12
+    # ★ `preview` 的上限从 12 收到 5 ★
+    #   用户：「这里目前最大 5，多了没有用」——
+    #   §16.58 之后圈只提前 `lead` 秒出现（上限 1.2 秒），
+    #   排在第 6 个往后的音根本没有圈可看，只有一块越来越淡的预告格。
+    #   改上限时 `control_build.py` 的 `sp_preview.setRange()` 要一起改，
+    #   两边对不上会出现"控件显示 5、配置里存着 8"这种各说各话。
+    assert cfg['preview'] == 5
 
 
 def test_garbage_in_numeric_field_uses_default():

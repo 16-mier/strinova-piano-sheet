@@ -52,7 +52,15 @@ from . import theme as T
 #   原来是 16 行、每行一个音高（钢琴卷帘）。用户要的是「剪辑软件」那种：
 #   **几条自由轨道**，上下拖只是换个"层"避免方块挤在一起，
 #   音高写在块上就够 —— 所以行和音高**不再绑定**。
-LANES = 6           # 自由轨道数
+#
+#   ★ 2026-09：从"固定 6 条"变成"默认 6 条、可以切 12 条" ★
+#     用户：「这里面新增一个按钮开启 12 轨，正常 6 轨」。
+#     所以这个常量现在的身份是**默认值**，真正在用的是实例属性
+#     `self.lanes`（见 `TimelineEditor.__init__` 和 `set_lanes()`）——
+#     下面所有算式都读 `self.lanes`，不再读这个名字。
+#     `ui/editor.py` 那边要挂 6/12 的开关。
+LANES = 6           # 默认轨道数（正常 6 轨）
+LANES_MAX = 12      # 上限（用户要的"开启 12 轨"）
 ROW_H = 40          # 每条轨道的高度（行少了，可以给高一点）
 HEADER_W = 64       # 左边轨道头宽度
 
@@ -185,13 +193,19 @@ class TimelineEditor(QWidget):
         self._sa_looked = False
         self._last_w = 0             # 上次设过的最小宽度（别重复设，很贵）
         self._hover_lane = None      # 鼠标悬在哪条轨道上（轨道头跟着亮）
+        # ★ 轨道数（实例属性，不是模块常量）★
+        #   用户：「这里面新增一个按钮开启 12 轨，正常 6 轨」。
+        #   默认 `LANES`（6），由 `set_lanes()` 切成 12。
+        #   下面所有算式一律读 `self.lanes` —— 一个都不许再读 `LANES`，
+        #   不然切了之后会"画 12 条、点只认 6 条"这种半截状态。
+        self.lanes = LANES
         # ★ Shift + 长按 = "多选方块"（不制造选区）★
         #   `_hold_shift` 记按下那一刻的 Shift；`_band_cur` 是矩形另一头。
         self._hold_shift = False
         self._band_cur: float | None = None
 
         self.setMouseTracking(True)
-        self.setMinimumHeight(RULER_H + LANES * ROW_H + 8)
+        self.setMinimumHeight(RULER_H + self.lanes * ROW_H + 8)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     # ---------------- 数据 ----------------
@@ -479,17 +493,58 @@ class TimelineEditor(QWidget):
 
         `lane 0` 在最下面（跟原来 PAD1 在底的直觉一致）。
         """
-        lane = max(0, min(LANES - 1, int(lane)))
-        return RULER_H + (LANES - 1 - lane) * ROW_H
+        lane = max(0, min(self.lanes - 1, int(lane)))
+        return RULER_H + (self.lanes - 1 - lane) * ROW_H
 
     def _y_lane(self, y: float) -> int:
         """y -> 轨道号（落在标尺上时按最上面那条算）。"""
-        lane = LANES - 1 - int((float(y) - RULER_H) // ROW_H)
-        return max(0, min(LANES - 1, lane))
+        lane = self.lanes - 1 - int((float(y) - RULER_H) // ROW_H)
+        return max(0, min(self.lanes - 1, lane))
 
     def lanes_bottom(self) -> float:
         """轨道区的下边界（= 标尺高 + 所有轨道高）。"""
-        return float(RULER_H + LANES * ROW_H)
+        return float(RULER_H + self.lanes * ROW_H)
+
+    def set_lanes(self, n: int) -> bool:
+        """切换轨道数（6 / 12）。返回"轨数真的变了没有"。
+
+        用户：「这里面新增一个按钮开启 12 轨，正常 6 轨」。
+
+        ★ 为什么切小的时候要挪音符 ★
+          12 → 6 之后，原来摆在 7~12 轨上的方块会全部落到**轨道区外面**
+          （`_lane_y` 算出来的 y 是负数），画不出来也点不到 ——
+          在用户看来就是"音符丢了"。
+          所以切小之前先把它们压回最后一条轨道。
+          这确实改了数据，但比"看不见的音符"强得多，
+          而且语义上也对：按一下 6 轨就是把多出来的层收掉。
+
+        ★ 切大不需要动音符 ★
+          `lane 0` 永远在最下面，所以 0~5 轨的方块位置原样有效；
+          多出来的 6 条是空的，等着用户往上摆。
+
+        ★ 重排交给 `auto_lanes_now()` ★
+          「重叠的自动错开轨道」开着的话，它会按新轨数重新摊一遍；
+          关着就一个都不动（那是用户自己的选择）。
+        """
+        n = max(1, min(LANES_MAX, int(n)))
+        if n == self.lanes:
+            return False
+        if self.model is not None and n < self.lanes:
+            for nt in self.model.notes:
+                if getattr(nt, 'lane', 0) > n - 1:
+                    nt.lane = n - 1
+                    # 打上"手动摆过"的标记 —— 不然 `auto_lanes_now()`
+                    # 立刻又会把它挪到别的轨道去，用户看到的是"我刚收上来的
+                    # 方块又自己跑了"。
+                    nt.lane_fixed = True
+        self.lanes = n
+        self._hover_lane = None
+        self._reset_multi()
+        self.setMinimumHeight(RULER_H + self.lanes * ROW_H + 8)
+        self.auto_lanes_now()
+        self._update_size()
+        self.update()
+        return True
 
     def _note_w(self) -> float:
         """块的宽度 —— **所有块一样宽**，不按真实时值画。"""
@@ -1059,7 +1114,7 @@ class TimelineEditor(QWidget):
         if not self.auto_lane_on or self.model is None:
             return 0
         try:
-            return self.model.auto_lanes(LANES, NOTE_W_BEAT)
+            return self.model.auto_lanes(self.lanes, NOTE_W_BEAT)
         except Exception:
             return 0
 
@@ -1246,7 +1301,7 @@ class TimelineEditor(QWidget):
         #   PR 里也有这个反馈；方块叠在一起时，"我现在会落到哪条轨道"
         #   全靠它给一个明确的暗示。
         p.setPen(Qt.PenStyle.NoPen)
-        for lane in range(LANES):
+        for lane in range(self.lanes):
             if lane == self._hover_lane:
                 c = QColor(255, 255, 255, 34)
             else:
@@ -1256,7 +1311,7 @@ class TimelineEditor(QWidget):
             p.drawRect(QRectF(HEADER_W, self._lane_y(lane),
                               w - HEADER_W, ROW_H))
         p.setPen(QPen(QColor(255, 255, 255, 26), 1))
-        for k in range(LANES + 1):
+        for k in range(self.lanes + 1):
             y = RULER_H + k * ROW_H
             p.drawLine(int(HEADER_W), int(y), int(w), int(y))
         # 轨道区以外的地方（窗口比轨道高时）抹平，别留一条色带
@@ -1449,7 +1504,7 @@ class TimelineEditor(QWidget):
 
         f3 = QFont()
         f3.setPointSizeF(9.0)
-        for lane in range(LANES):
+        for lane in range(self.lanes):
             y = self._lane_y(lane)
             hover = (lane == self._hover_lane)
             if hover:

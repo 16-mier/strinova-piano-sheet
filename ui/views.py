@@ -22,8 +22,8 @@ import time
 from dataclasses import dataclass
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import (QBrush, QColor, QFont, QPainter, QPen, QPolygonF,
-                         QFont)
+from PyQt6.QtGui import (QBrush, QColor, QConicalGradient, QFont,
+                         QPainter, QPen, QPolygonF)
 from PyQt6.QtWidgets import QWidget
 
 from core import layout
@@ -714,6 +714,7 @@ class GridView(SheetView):
         self._paint_rings(p, f)
         self._paint_labels(p, f)
         self._paint_badges(p, f)
+        self._paint_countdown(p, f)
         self._paint_unmapped_hint(p, f)
 
     def _frame(self) -> _Frame | None:
@@ -903,13 +904,21 @@ class GridView(SheetView):
             #   才走这一支。
             if (cell is not None
                     and repeat_run(f.group, 0, cell) >= 2):
-                return (T.UPCOMING[0], T.PRESS, T.ACTIVE_TEXT,
+                # ★ 字色必须是**深色** ★
+                #   这一支的底色是 `UPCOMING[0]`（淡黄 255,238,158），
+                #   而原来这里写死的 `T.ACTIVE_TEXT` 是浅奶油
+                #   (238,244,226) —— 两个亮度几乎一样，音名直接看不见了。
+                #   用户看到的现象就是"连按那格的键名没了"。
+                return (T.UPCOMING[0], T.PRESS, T.DARK_TEXT,
                         -f.cell * 0.05)          # 仍然微微放大
-            return (T.ACTIVE, T.ACTIVE_EDGE, T.ACTIVE_TEXT,
+            return (T.ACTIVE, T.ACTIVE_EDGE, _txt_for(T.ACTIVE),
                     -f.cell * 0.05)              # 当前格微微放大
         idx = min(rank - 1, len(T.UPCOMING) - 1)
-        return (T.UPCOMING[idx], T.UPCOMING[idx].lighter(125),
-                T.ACTIVE_TEXT, 0.0)
+        # ★ 预告格也一样按底色分流 ★
+        #   前几档是浅黄（要深字），最后几档已经淡到接近灰蓝（要浅字）——
+        #   一条写死的颜色不可能两头都对。
+        _fill = T.UPCOMING[idx]
+        return (_fill, _fill.lighter(125), _txt_for(_fill), 0.0)
 
     def _paint_cells(self, p: QPainter, f: _Frame):
         """格子的底色和边 —— 只有这两样，文字在 `_paint_labels` 里另画。"""
@@ -1069,18 +1078,38 @@ class GridView(SheetView):
                     ring = QRectF(c.x() - radius, c.y() - radius,
                                   radius * 2.0, radius * 2.0)
                     p.setBrush(Qt.BrushStyle.NoBrush)
+                    # ★ 描边改成"扫描头带拖尾"的渐变 ★
+                    #   用户：「把圆圈改成倒计时加渐变色吧」，
+                    #   渐变色方向选的是"扫描头带拖尾"。
+                    #
+                    #   ★ 为什么是**锥形**渐变，不是径向 ★
+                    #     圆环上同一个半径的像素颜色是一样的 ——
+                    #     径向渐变画上去，整圈就是一个纯色，
+                    #     "头"和"尾"根本分不出来。
+                    #     锥形渐变按**角度**取色，才能做出
+                    #     "一段最亮、顺着转过去越来越淡"的拖尾。
+                    #
+                    #   起点角度固定 90°（正上方），不跟着时间转 ——
+                    #   圈本身已经在缩了，再叠一层旋转会让人以为
+                    #   那是在转圈而不是在倒计时。
+                    grad = QConicalGradient(c.x(), c.y(), 90.0)
+                    grad.setColorAt(0.0, QColor(T.PRESS.red(), T.PRESS.green(),
+                                                T.PRESS.blue(), alpha))
+                    grad.setColorAt(0.55, QColor(
+                        T.PRESS.red(), T.PRESS.green(), T.PRESS.blue(),
+                        int(alpha * 0.38)))
+                    grad.setColorAt(1.0, QColor(T.PRESS.red(), T.PRESS.green(),
+                                                T.PRESS.blue(), 0))
                     if light_bg:
-                        # 先垫一圈更粗的深色，再画亮黄。
+                        # 先垫一圈更粗的深色，再画渐变。
                         # （试过换个更亮的颜色、单纯加大线宽，都不行：
                         #   底色本身就那么亮，亮色的天花板就那么高，
                         #   只能靠明暗对比来把轮廓拉出来。）
-                        p.setPen(QPen(self._dim(
-                            QColor(26, 20, 4, int(alpha * 0.72))),
+                        p.setPen(QPen(QBrush(self._dim(
+                            QColor(26, 20, 4, int(alpha * 0.72)))),
                             wide + f.cell * 0.024))
                         p.drawEllipse(ring)
-                    p.setPen(QPen(self._dim(
-                        QColor(T.PRESS.red(), T.PRESS.green(),
-                               T.PRESS.blue(), alpha)), wide))
+                    p.setPen(QPen(QBrush(grad), wide))
                     p.drawEllipse(ring)
                 # ★ 缩得很小的时候，在中心补一个实心亮点 ★
                 #   光靠一圈细线，"就是现在"那一下反而最不明显 ——
@@ -1222,6 +1251,57 @@ class GridView(SheetView):
                 _paint_run(p, bcircle.center().x() - bw / 2.0,
                            bcircle.bottom() + bh * 0.16, bw, bh, run_next)
 
+    def _paint_countdown(self, p: QPainter, f: _Frame):
+        """圈上那个"还剩几秒" —— 用户要的倒计时。
+
+        用户：「把圆圈改成倒计时加渐变色吧」，
+        倒计时那一问选的是"圈中间写剩余秒数"。
+
+        ★ 数字放在格子**右上角**，不是正中心 ★
+          正中心是音名（`_paint_labels` 画的大字）。数字压上去，就是拿
+          "还剩多久"换掉一半"该按哪个键" —— 两个都是要紧信息，
+          不能互相盖。右上角本来是空的（左上角给了序号角标），
+          而且离圆心最近，视觉上仍然算"圈里"。
+
+        ★ 必须在音名**之后**画 ★
+          `paintEvent` 的层次是"圈 → 音名 → 角标"（见那里的大段注释）。
+          数字要是跟圈画在一起，会被音名整块盖掉 —— 所以它跟序号角标
+          同一层，由 `paintEvent` 在 `_paint_badges` 之后单独调一次。
+
+        ★ 显示范围跟圈对齐 ★
+          `left ∈ [0, lead]`：从圈出现一直到该按那一刻。
+          缩完之后（`left < 0`，也就是 `RING_TAIL` 那条尾巴）就不写了 ——
+          那时数字已经是 "0.0" 或者负数，写着反而让人以为还得再等。
+
+        ★ 格式 `%.1f` ★
+          一位小数就是这套提示的分辨率：`set_time` 是 8 ms 一跳，
+          但人的眼睛读不出 0.01 秒，写两位小数只会让人多花时间去看。
+        """
+        if not f.blinking or f.cell <= 10.0:
+            return
+        for _cells, rest, _name, start, lead in f.timed:
+            if rest:
+                continue
+            left = start - self.sec
+            if left < 0.0 or left > lead:
+                continue
+            txt = '%.1f' % left
+            for (row, col) in _cells:
+                r = self._cell_rect(f, row, col)
+                bw = max(26.0, f.cell * 0.34)
+                bh = max(16.0, f.cell * 0.20)
+                box = QRectF(r.right() - bw - f.cell * 0.04,
+                             r.top() + f.cell * 0.04, bw, bh)
+                # 深色圆角底 —— 数字得同时压在淡黄预告底、深橄榄当前底、
+                # 青色闪光上都看得清，光靠字色做不到。
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(QColor(18, 14, 2, 205)))
+                p.drawRoundedRect(box, bh * 0.34, bh * 0.34)
+                p.setPen(QPen(QColor(T.PRESS.red(), T.PRESS.green(),
+                                     T.PRESS.blue())))
+                p.setFont(_fit_font(bh * 0.66, bold=True))
+                p.drawText(box, Qt.AlignmentFlag.AlignCenter, txt)
+
     # -- 两层闪光 --
 
     def _paint_hot_flash(self, p: QPainter, f: _Frame):
@@ -1352,6 +1432,27 @@ def _fit_font(size: float, bold: bool = False) -> QFont:
     f.setPointSizeF(max(7.0, size))
     f.setBold(bold)
     return f
+
+
+def _txt_for(fill: QColor) -> QColor:
+    """格子里的字该用什么颜色 —— **看底色浅还是深**。
+
+    ★ 为什么不能写死一个颜色 ★
+      用户报过：连按的当前格上，音名**看不见了**。
+      查下来不是被谁盖住 —— 是 `ACTIVE_TEXT`（浅奶油 238,244,226）
+      压在 `UPCOMING[0]` 的淡黄 (255,238,158) 上，两个亮度几乎一样，
+      等于白字写白纸。
+      那个字色本来就是给深橄榄底配的（见 `theme.ACTIVE_TEXT` 的注释
+      "深底上用浅字"），可**前面几个预告格和连按的当前格都是浅底** ——
+      一条路径改了颜色，另一条忘了跟着改。
+
+    ★ 阈值 140 是拿 `UPCOMING` 那五档量出来的 ★
+       (255,238,158) / (222,212,152) → 亮度都 > 190，必须深字
+       (192,188,152) / (164,164,152) → 155 上下，深字更稳
+       (146,150,154)                 → 145 上下，两种都行，取浅字
+                                        跟深橄榄那边统一
+    """
+    return T.DARK_TEXT if fill.lightness() >= 140 else T.ACTIVE_TEXT
 
 
 def _paint_run(p: QPainter, x: float, y: float, w: float, h: float, n: int):

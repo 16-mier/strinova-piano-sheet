@@ -193,7 +193,19 @@ class BuilderMixin:
         fv = QFormLayout(g_view)
 
         self.sp_preview = QSpinBox()
-        self.sp_preview.setRange(2, 12)
+        # ★ 上限从 12 收到 5 ★
+        #   用户：「这里目前最大 5，多了没有用」。
+        #
+        #   这个数管的是"往后画几个音"：预告格、序号角标 `1 2 3…`、
+        #   还有收缩圆圈。
+        #
+        #   §16.58 之后这条更明显了 —— 圈只提前 `lead` 秒出现
+        #   （`lead` = 相邻两个音的间隔，上限 1.2 秒），
+        #   所以排在第 6 个往后的音**根本没有圈可看**；
+        #   它们只剩一块淡黄预告格，而且颜色一波比一波淡（`T.UPCOMING`
+        #   是渐淡的），堆到后面就是一片糊。
+        #   5 个是用户实测下来够用的量。
+        self.sp_preview.setRange(2, 5)
         self.sp_preview.setValue(5)
         self.sp_preview.setSuffix(' 个音')
         # 别让它被 QFormLayout 拉满整行 —— 一个"5 个音"的数值框
