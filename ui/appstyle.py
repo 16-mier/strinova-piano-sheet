@@ -615,6 +615,44 @@ QGroupBox::title {
     background-color: %(WINDOW)s;
 }
 
+/* ============ 面板（Premiere 那种分区）============ */
+/* ★ 为什么还要单独做一套，不用现成的 QGroupBox ★
+   `QGroupBox::title` 是个**子控件**，它的宽度只到文字 —— QSS 的子控件
+   没有"撑满整块宽度"这种写法，所以"标题栏横贯整条"根本写不出来。
+
+   （★ 这段注释躺在"百分号格式化"的模板字符串里，**里面不能出现孤立的
+     百分号**，要写就得写两个。我第一版就是随手写了个百分号，
+     `build_qss()` 当场抛 "unsupported format character" ——
+     主题整个装不上，界面悄悄退回系统默认配色。
+     ruff 的 F509 抓到了它。
+     后来加注释说明这件事的时候又写了一个 —— 所以有了
+     `tools/scan_qss_percent.py`。）
+
+   而 Premiere / 达芬奇那类剪辑软件的面板恰恰就是那个样子：
+   顶上一条实心标题栏横贯整条，内容明确待在下面。
+   用户要的分区感就是它（原话「可以和PR的轨道一样啊」）。
+
+   所以用一个 QFrame + 一个 QLabel 搭（见 `ui/panel.py`）。
+   `QGroupBox` 自己那几条样式**留着** —— 控制台那边还在用。 */
+QFrame#panel {
+    background-color: %(GROUP)s;
+    border: 1px solid %(EDGE)s;
+    border-radius: 12px;
+}
+QLabel#panelTitle {
+    background-color: %(PANEL_HI)s;
+    color: %(TEXT)s;
+    font-weight: 600;
+    padding: 8px 12px;
+    /* 圆角比外框小 1px —— 外框的边框占掉 1px，不跟着减会露出底色 */
+    border-top-left-radius: 11px;
+    border-top-right-radius: 11px;
+    border-bottom: 1px solid %(EDGE)s;
+}
+QWidget#panelBody {
+    background: transparent;
+}
+
 /* ============ 按钮 ============ */
 QPushButton {
     background-color: %(PANEL_HI)s;

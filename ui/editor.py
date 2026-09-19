@@ -19,8 +19,7 @@ from PyQt6.QtCore import QSettings, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (QColor, QFont, QIcon, QSyntaxHighlighter,
                          QTextCharFormat)
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFileDialog, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
+    QApplication, QCheckBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QSplitter, QTextEdit, QVBoxLayout,
 )
 
@@ -28,6 +27,7 @@ from core import encode, layout, parser, timeline
 from core.edit_model import SPB, EditModel, pitch_order
 
 from . import appstyle, theme as T
+from .panel import PanelBox
 from .edit_player import EditPlayer
 from .keypad import KeyPad
 from .timeline_edit import (LANES, LANES_MAX, ROW_H, RULER_H,
@@ -271,8 +271,8 @@ class EditorDialog(QDialog):
         self.pad.setMinimumSize(200, 200)
         n = self.pad.load_notes()
 
-        pad_box = QGroupBox('打击垫（点了就出声）')
-        pb = QVBoxLayout(pad_box)
+        pad_box = PanelBox('打击垫（点了就出声）')
+        pb = pad_box.inner
         # ★ `stretch=1`，而且**不带对齐** ★
         #   带 `AlignHCenter` 的话 Qt 只按 `sizeHint` 摆它、**绝不拉伸** ——
         #   打击垫就永远卡在 `minimumSize` 那个尺寸上，"做大点"根本没发生。
@@ -430,8 +430,8 @@ class EditorDialog(QDialog):
         #   这排按钮除了占地方没别的用。
         #   （要点一下才能插入，本身还比打字慢；`#` / `:` 这些
         #     平时也不在中文输入法里，直接敲更方便。）
-        text_box = QGroupBox('谱面文本')
-        tb = QVBoxLayout(text_box)
+        text_box = PanelBox('谱面文本')
+        tb = text_box.inner
         tb.addWidget(self.text, 1)
 
         # ★ 打击垫和谱面文本之间放一根**可拖的分隔条** ★
@@ -463,8 +463,8 @@ class EditorDialog(QDialog):
         self.tl_scroll.setMinimumHeight(RULER_H + LANES * ROW_H + 24)
         self.tl_scroll.setObjectName('timeline_scroll')
 
-        tl_box = QGroupBox('时间轴')
-        tlb = QVBoxLayout(tl_box)
+        tl_box = PanelBox('时间轴')
+        tlb = tl_box.inner
 
         # ★ 操作说明从**标题**里搬出来，做成独立的一行说明 ★
         #   原来整段塞在 `QGroupBox` 的 title 里，有两个硬伤：
