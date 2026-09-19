@@ -830,6 +830,27 @@ class ControlWindow(BuilderMixin, QMainWindow):
           所以它是个**临时**状态：点完记得关，不然会挡住游戏画面。
         """
         on = bool(on)
+        # ★ 关「可按」的时候，必须把「跟打」也一起关掉 ★
+        #
+        #   「跟打」的整个意义就是"你点格子出声"，它**依赖浮窗能接收鼠标**。
+        #   可按一关，浮窗立刻恢复 `WS_EX_TRANSPARENT`，格子根本点不到。
+        #
+        #   不联动的话会留下一个**骗人的状态**：浮窗上「跟打」那颗按钮
+        #   还亮着，可点格子毫无反应 —— 用户没法从界面上分辨
+        #   "跟打开着但失灵了"和"跟打没开"。审计实测过这条路径：
+        #   浮窗开着跟打时，在控制台手动关掉「可按」。
+        #
+        #   ★ 反过来不成立 ★ 关跟打**不该**顺手把可按也关掉 ——
+        #   用户可能还想接着点格子玩，那是他自己勾的。
+        #   （所以联动只写在 `_set_karaoke` → `_set_pad_click` 一个方向，
+        #     这里补的是另一个方向的收口。）
+        #
+        #   ★ 这里会重入一次 ★ `_set_karaoke(False)` 内部又调回本函数，
+        #   但那时 `player.karaoke` 已经是 False，条件不再成立，
+        #   只递归一层就到底；回来之后 `return`，免得把活干两遍。
+        if not on and getattr(self.player, 'karaoke', False):
+            self._set_karaoke(False)
+            return
         try:
             self.overlay.set_click_through(not on)
         except Exception:

@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
@@ -48,7 +49,8 @@ PANEL = '#161a24'           # 面板 / 工具条
 PANEL_HI = '#1c2130'        # 面板上的高亮块
 GROUP = '#1a1f2c'           # 分组框底
 INPUT = '#0d1017'           # 输入框底（比窗口更暗 = 凹进去）
-INPUT_HI = '#131824'        # 输入框悬停
+# （`INPUT_HI` 删了 —— 全项目没有一处 `%(INPUT_HI)s`。
+#   输入框悬停实际用的是 `PANEL_HI`。）
 
 EDGE = '#2a3244'            # 常规边框
 EDGE_HI = '#3a4560'         # 悬停边框
@@ -64,8 +66,16 @@ ACCENT_HI = '#5fe0bd'       # 悬停
 ACCENT_DIM = '#1f5f50'      # 压下
 ACCENT_SOFT = '#173a33'     # 强调色的淡淡打底
 
-GOLD = '#ffd64a'            # 跟 theme.PRESS 一致（"正在发生"）
-GOLD_DIM = '#7a6520'
+# （`GOLD` / `GOLD_DIM` 删了 —— 模板里一次都没引用过。
+#
+#   ★ 顺带记一笔，免得下一个人"去统一"的时候踩坑 ★
+#     审计看到这里定义的是 `#ffd64a`（= `theme.PRESS` 同一个值），
+#     而项目里真正在用的"金"是 **`#ffd230`**，硬编码在
+#     `ui/hotkeys.py` 和 `ui/overlay.py` 各一处。
+#
+#     它们是**两个不同的值**（G 通道差 22）。所以这里不是"同一个颜色
+#     写了两遍"，而是"一个没人用的常量 + 两处真正生效的硬编码"。
+#     我把没人用的删掉，**没有**去动那两处 —— 那会改变画面。
 DANGER = '#ff8a8a'          # 危险操作（全删）
 
 SEL_BG = '#26435a'          # 列表项选中
@@ -84,63 +94,40 @@ _ICON_CACHE: dict[str, str] = {}
 
 
 def _icon_dir() -> str:
+    """图标 PNG 的落地目录（`%TEMP%\\kaqiu_piano_ui`）。
+
+    ★ 为什么这里要把失败包起来 ★
+      这个函数是在 `apply()` → `build_qss()` 的链路上被调用的，而
+      `main.py` 装主题那一行**没有 try**。磁盘满、`%TEMP%` 被组策略
+      禁写、防病毒短暂锁住目录 —— `os.makedirs` 一抛，整个程序就起不来，
+      而且表现是最难查的那种：**双击了没反应**。
+
+      所以失败时退回 `%TEMP%` 本身（它一定存在）。后面每张图
+      写不进去会自己报到 stderr（见 `_cached_png`），
+      而不是把整个程序带走。
+    """
     d = os.path.join(tempfile.gettempdir(), 'kaqiu_piano_ui')
-    os.makedirs(d, exist_ok=True)
-    return d
+    try:
+        os.makedirs(d, exist_ok=True)
+        return d
+    except Exception:
+        return tempfile.gettempdir()
 
 
 def _check_icon(color: str, size: int = 14) -> str:
     """画一个对勾 PNG，返回给 QSS 用的绝对路径（正斜杠）。"""
-    key = 'check_%s_%d' % (color.lstrip('#'), size)
-    hit = _ICON_CACHE.get(key)
-    if hit:
-        return hit
-    path = os.path.join(_icon_dir(), key + '.png')
-    if not os.path.exists(path):
-        pm = QPixmap(size, size)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    def draw(p, s):
         pen = QPen(QColor(color))
         pen.setWidthF(2.0)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         p.setPen(pen)
-        s = size / 14.0
         p.drawPolyline([
             QPointF(3.0 * s, 7.4 * s),
             QPointF(5.9 * s, 10.3 * s),
             QPointF(11.2 * s, 4.2 * s),
         ])
-        p.end()
-        pm.save(path, 'PNG')
-    out = path.replace('\\', '/')
-    _ICON_CACHE[key] = out
-    return out
-
-
-def _dash_icon(color: str, size: int = 14) -> str:
-    """画一个横杠（用于"半选"态，暂时没用上，留着备用）。"""
-    key = 'dash_%s_%d' % (color.lstrip('#'), size)
-    hit = _ICON_CACHE.get(key)
-    if hit:
-        return hit
-    path = os.path.join(_icon_dir(), key + '.png')
-    if not os.path.exists(path):
-        pm = QPixmap(size, size)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        pen = QPen(QColor(color))
-        pen.setWidthF(2.0)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(pen)
-        s = size / 14.0
-        p.drawLine(QPointF(3.2 * s, 7.0 * s), QPointF(10.8 * s, 7.0 * s))
-        p.end()
-        pm.save(path, 'PNG')
-    out = path.replace('\\', '/')
-    _ICON_CACHE[key] = out
-    return out
+    return _cached_png('check', [color.lstrip('#')], size, draw)
 
 
 def _arrow_icon(color: str, size: int = 12, up: bool = False) -> str:
@@ -155,16 +142,7 @@ def _arrow_icon(color: str, size: int = 12, up: bool = False) -> str:
       很容易变成一个灰色小方块（实测就是这样）。
       老老实实给一张图，最稳。
     """
-    key = 'arrow_%s_%d_%d' % (color.lstrip('#'), size, 1 if up else 0)
-    hit = _ICON_CACHE.get(key)
-    if hit:
-        return hit
-    path = os.path.join(_icon_dir(), key + '.png')
-    if not os.path.exists(path):
-        pm = QPixmap(size, size)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    def draw(p, s):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(color))
         h = size - 1.0
@@ -173,11 +151,8 @@ def _arrow_icon(color: str, size: int = 12, up: bool = False) -> str:
             tri = [QPointF(2.0, h - 2.6), QPointF(h - 1.0, h - 2.6),
                    QPointF(h / 2.0, 2.0)]
         p.drawPolygon(QPolygonF(tri))
-        p.end()
-        pm.save(path, 'PNG')
-    out = path.replace('\\', '/')
-    _ICON_CACHE[key] = out
-    return out
+    return _cached_png('arrow', [color.lstrip('#'), str(1 if up else 0)],
+                       size, draw)
 
 
 def _speaker_icon(color: str, size: int = 16, muted: bool = False) -> str:
@@ -193,17 +168,7 @@ def _speaker_icon(color: str, size: int = 16, muted: bool = False) -> str:
       项目里为同一类事栽过一回（见上面 `_arrow_icon`：能画的别指望样式），
       所以这里也老老实实画出来。
     """
-    key = 'spk_%s_%d_%d' % (color.lstrip('#'), size, 1 if muted else 0)
-    hit = _ICON_CACHE.get(key)
-    if hit:
-        return hit
-    path = os.path.join(_icon_dir(), key + '.png')
-    if not os.path.exists(path):
-        pm = QPixmap(size, size)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        s = size / 14.0
+    def draw(p, s):
         col = QColor(color)
         # 箱体 + 喇叭口连成一个多边形，一次画完
         p.setPen(Qt.PenStyle.NoPen)
@@ -225,11 +190,8 @@ def _speaker_icon(color: str, size: int = 16, muted: bool = False) -> str:
             # 一道声波弧（开口朝右）
             p.drawArc(QRectF(6.4 * s, 4.5 * s, 4.6 * s, 5.0 * s),
                       -55 * 16, 110 * 16)
-        p.end()
-        pm.save(path, 'PNG')
-    out = path.replace('\\', '/')
-    _ICON_CACHE[key] = out
-    return out
+    return _cached_png('spk', [color.lstrip('#'), str(1 if muted else 0)],
+                       size, draw)
 
 
 def sound_icon(on: bool, size: int = 16) -> str:
@@ -247,17 +209,7 @@ def _bar_icon(kind: str, color: str, size: int = 16) -> str:
     全部按 14×14 的网格设计，实心块用填充、其余的用与文字同色的线条。
     浮窗控制条和控制台/制谱器的播放按钮共用这一套。
     """
-    key = 'bar_%s_%s_%d' % (kind, color.lstrip('#'), size)
-    hit = _ICON_CACHE.get(key)
-    if hit:
-        return hit
-    path = os.path.join(_icon_dir(), key + '.png')
-    if not os.path.exists(path):
-        pm = QPixmap(size, size)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        s = size / 14.0
+    def draw(p, s):
         col = QColor(color)
         if kind == 'play':
             p.setPen(Qt.PenStyle.NoPen)
@@ -302,11 +254,7 @@ def _bar_icon(kind: str, color: str, size: int = 16) -> str:
             p.setPen(pen)
             for y in (3.9, 7.0, 10.1):
                 p.drawLine(QPointF(2.7 * s, y * s), QPointF(11.3 * s, y * s))
-        p.end()
-        pm.save(path, 'PNG')
-    out = path.replace('\\', '/')
-    _ICON_CACHE[key] = out
-    return out
+    return _cached_png('bar', [kind, color.lstrip('#')], size, draw)
 
 
 def bar_icon(kind: str, size: int = 15) -> str:
@@ -362,17 +310,7 @@ def record_icon(size: int = 15) -> str:
 
 def _trash_icon(color: str, size: int = 15) -> str:
     """画一个垃圾桶 PNG（曲谱侧栏上那颗「删掉这份谱面」用）。"""
-    key = 'trash_%s_%d' % (color.lstrip('#'), size)
-    hit = _ICON_CACHE.get(key)
-    if hit:
-        return hit
-    path = os.path.join(_icon_dir(), key + '.png')
-    if not os.path.exists(path):
-        pm = QPixmap(size, size)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        s = size / 14.0
+    def draw(p, s):
         col = QColor(color)
         pen = QPen(col)
         pen.setWidthF(1.5 * s)
@@ -395,11 +333,7 @@ def _trash_icon(color: str, size: int = 15) -> str:
         # 桶身上两条竖纹
         p.drawLine(QPointF(6.0 * s, 6.7 * s), QPointF(6.3 * s, 10.6 * s))
         p.drawLine(QPointF(8.0 * s, 6.7 * s), QPointF(7.7 * s, 10.6 * s))
-        p.end()
-        pm.save(path, 'PNG')
-    out = path.replace('\\', '/')
-    _ICON_CACHE[key] = out
-    return out
+    return _cached_png('trash', [color.lstrip('#')], size, draw)
 
 
 def trash_icon(size: int = 15) -> str:
@@ -451,7 +385,13 @@ def _cached_png(prefix: str, parts: list[str], size: int, draw) -> str:
     """
     key = '%s_%s_%d' % (prefix, '_'.join(parts), size)
     hit = _ICON_CACHE.get(key)
-    if hit:
+    # ★ 命中缓存也要回头看一眼文件还在不在 ★
+    #   `%TEMP%` 是会被清理的地方（Windows 的存储感知、各种清理工具
+    #   都盯着它），而 `_ICON_CACHE` 是**模块级**的、活到进程结束。
+    #   运行中间被清一次，这张图就再也回不来了 —— 之后每次
+    #   `build_qss()` 拿到的都是同一个"文件已经不存在"的老路径。
+    #   多一次 stat 换掉这个坑，很划算。
+    if hit and os.path.exists(hit):
         return hit
     path = os.path.join(_icon_dir(), key + '.png')
     if not os.path.exists(path):
@@ -461,7 +401,13 @@ def _cached_png(prefix: str, parts: list[str], size: int, draw) -> str:
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         draw(p, size / 14.0)
         p.end()
-        pm.save(path, 'PNG')
+        # ★ 写不进去要出声 ★
+        #   `QPixmap.save()` 失败是**返回 False**，不抛异常。不报的话，
+        #   QSS 里就留下一条指向不存在文件的 `url()` —— Qt 静默不画图，
+        #   用户看到的是"勾选框里没有勾""下拉框没有三角"，
+        #   而排查时一点线索都没有。
+        if not pm.save(path, 'PNG'):
+            sys.stderr.write('[appstyle] 图标写不进去：%s\n' % path)
     out = path.replace('\\', '/')
     _ICON_CACHE[key] = out
     return out
@@ -560,7 +506,9 @@ def piano_icon(size: int = 15) -> str:
 
 def build_qss() -> str:
     check_light = _check_icon('#0d1017', 14)      # 绿底上用深色勾
-    check_accent = _check_icon(ACCENT, 14)        # 深底上用青色勾
+    # （这里原来还有一张 `check_accent`（青色的勾）—— 它被生成出来、
+    #   传进 format 字典，可模板里**一次都没引用过**。每次启动都白写
+    #   一张 PNG 到 %TEMP%。实测 `%(check_accent)s` 全文件 0 命中。）
     arrow = _arrow_icon(TEXT_DIM, 12)
     arrow_hi = _arrow_icon(ACCENT_HI, 12)
     # ★ 数字框的箭头要**更小** ★
@@ -1056,46 +1004,12 @@ QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
     background-color: #2c3548;
 }
 
-/* ============ 选项卡 ============ */
-QTabWidget::pane {
-    background-color: %(PANEL)s;
-    border: 1px solid %(EDGE)s;
-    border-radius: 10px;
-    top: -1px;
-}
-QTabBar::tab {
-    background-color: transparent;
-    color: %(TEXT_DIM)s;
-    border: 1px solid transparent;
-    border-top-left-radius: 8px;
-    border-top-right-radius: 8px;
-    padding: 6px 16px;
-    margin-right: 3px;
-}
-QTabBar::tab:hover {
-    color: %(TEXT)s;
-    background-color: %(PANEL_HI)s;
-}
-QTabBar::tab:selected {
-    background-color: %(PANEL)s;
-    color: %(ACCENT_HI)s;
-    border-color: %(EDGE)s;
-    border-bottom-color: %(PANEL)s;
-}
-
 /* ============ 菜单 ============ */
-QMenuBar {
-    background-color: %(WINDOW)s;
-    border-bottom: 1px solid %(EDGE)s;
-}
-QMenuBar::item {
-    background: transparent;
-    padding: 5px 11px;
-    border-radius: 6px;
-}
-QMenuBar::item:selected {
-    background-color: %(PANEL_HI)s;
-}
+/* ★ 这里原来还有一整套 QTabWidget::pane / QTabBar::tab* ★
+     全项目 grep 下来 `QTabWidget` / `QTabBar` 只有这个文件里出现过 ——
+     一个选项卡控件都没建过。这类"没人的样式"留着比删掉更贵：
+     下一个人看到它会以为 Tab 是支持的，真去用了再回来调样式，
+     改了不生效才发现在跟空气较劲。 */
 QMenu {
     background-color: %(PANEL)s;
     border: 1px solid %(EDGE_HI)s;
@@ -1150,27 +1064,17 @@ QSplitter::handle:hover {
     background-color: %(ACCENT_DIM)s;
 }
 
-/* ============ 进度条 ============ */
-QProgressBar {
-    background-color: %(INPUT)s;
-    border: 1px solid %(EDGE)s;
-    border-radius: 6px;
-    text-align: center;
-    color: %(TEXT_DIM)s;
-}
-QProgressBar::chunk {
-    background-color: %(ACCENT_DIM)s;
-    border-radius: 5px;
-}
+/* ★ QProgressBar 那一套也删了 ★ 全项目没有进度条 —— 进度一律走
+   自绘（浮窗顶上那条、制谱器时间轴那条）。这里同样是 0 实例。 */
 """ % dict(
         WINDOW=WINDOW, PANEL=PANEL, PANEL_HI=PANEL_HI, GROUP=GROUP,
-        INPUT=INPUT, INPUT_HI=INPUT_HI, EDGE=EDGE, EDGE_HI=EDGE_HI,
+        INPUT=INPUT, EDGE=EDGE, EDGE_HI=EDGE_HI,
         EDGE_FOCUS=EDGE_FOCUS, TEXT=TEXT, TEXT_DIM=TEXT_DIM,
         TEXT_MUTE=TEXT_MUTE, ACCENT=ACCENT, ACCENT_HI=ACCENT_HI,
-        ACCENT_DIM=ACCENT_DIM, ACCENT_SOFT=ACCENT_SOFT, GOLD=GOLD,
-        GOLD_DIM=GOLD_DIM, DANGER=DANGER, SEL_BG=SEL_BG, SEL_EDGE=SEL_EDGE,
+        ACCENT_DIM=ACCENT_DIM, ACCENT_SOFT=ACCENT_SOFT,
+        DANGER=DANGER, SEL_BG=SEL_BG, SEL_EDGE=SEL_EDGE,
         DISABLED_BG=DISABLED_BG, DISABLED_TEXT=DISABLED_TEXT,
-        check_light=check_light, check_accent=check_accent,
+        check_light=check_light,
         arrow=arrow, arrow_hi=arrow_hi,
         arrow_up=arrow_up, arrow_down=arrow_down,
         arrow_up_hi=arrow_up_hi, arrow_down_hi=arrow_down_hi,
@@ -1215,7 +1119,6 @@ def apply(app) -> bool:
         return False
     if getattr(app, '_kaqiu_style_applied', False):
         return False
-    app._kaqiu_style_applied = True
     # ★ 必须在**创建任何控件之前**锁掉 style ★
     #   锁晚了的话已经建好的控件还是按老 style 画的。
     try:
@@ -1223,5 +1126,18 @@ def apply(app) -> bool:
     except Exception:
         pass
     app.setFont(ui_font())
-    app.setStyleSheet(build_qss())
+    # ★ 标志要放在**真装成功之后**，不能放在最前面 ★
+    #   原来它在第一行就置 True 了。可 `build_qss()` 是要干活的：
+    #   建临时目录、用 QPainter 画六张 PNG ——它万一抛一次
+    #   （磁盘满、%TEMP% 不可写、防病毒锁了文件），异常会一路传出去，
+    #   而**标志已经是 True**。于是之后任何一次 `apply()` 都在开头
+    #   直接 `return False`，主题**再也装不上**：整个程序永久停在
+    #   Fusion 默认的浅灰配色上，还找不到原因（因为没人会去怀疑
+    #   一个"已经装过了"的幂等标志）。
+    #   现在失败就不置位，下一次调用还能重试。
+    try:
+        app.setStyleSheet(build_qss())
+    except Exception:
+        return False
+    app._kaqiu_style_applied = True
     return True
