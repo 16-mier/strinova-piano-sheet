@@ -96,10 +96,17 @@ _STRINGS = ('last_sheet',)
 
 
 def _as_int(v, key: str):
+    """整数字段 —— 保证落在区间里，且**绝不抛异常**。
+
+    `OverflowError` 必须一起接住：JSON 里写个 `1e400` 读出来是
+    `float('inf')`，而 `int(inf)` 抛的是 OverflowError，不是
+    TypeError / ValueError —— 漏掉它的后果跟 `_as_str` 那边一样，
+    是"配置写坏 → 窗口打不开"。
+    """
     lo, hi = _RANGES.get(key, (None, None))
     try:
         n = int(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         n = int(DEFAULTS.get(key, 0))
     if lo is not None:
         n = max(lo, min(hi, n))
@@ -113,11 +120,26 @@ def _as_bool(v, key: str) -> bool:
 
 
 def _as_str(v, key: str) -> str:
-    if v is None:
-        return str(DEFAULTS.get(key, ''))
-    if isinstance(v, (list, tuple, dict)):
-        # 热键那种结构化取值交给调用方解析，这里只保证不崩
+    """字符串字段 —— **保证返回 str**。
+
+    ★ 这里原来是"不崩就行"，结果它是唯一会崩的地方 ★
+      老写法对 list / tuple / dict **原样返回**，理由是"热键那种结构化
+      取值交给调用方解析"。可热键压根不走这条路 —— 它们不在
+      `_STRINGS` 里，走的是 `normalise()` 最后那个 `else` 分支。
+
+      于是唯一的使用者 `last_sheet` 就成了受害者：用户在 `config.json`
+      里把 `"last_sheet"` 写成 `{}`（手滑、或者照抄了别的字段的格式），
+      这个 dict 会被原样放进配置 → `control.py` 里 `os.path.isfile(last)`
+      抛 `TypeError` → 而 `main.py` 构造主窗口时没有 try →
+      **窗口根本不出现，双击了没反应，连报错都看不到**。
+
+      改一个文本文件就把程序锁死，这个代价太大。所以现在：
+      不是字符串就退回默认值，结构化对象一律不许漏出去。
+    """
+    if isinstance(v, str):
         return v
+    if v is None or isinstance(v, (list, tuple, dict, set)):
+        return str(DEFAULTS.get(key, ''))
     return str(v)
 
 

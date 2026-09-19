@@ -21,9 +21,9 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import (QBrush, QColor, QConicalGradient, QFont,
-                         QPainter, QPen, QPolygonF)
+                         QPainter, QPen)
 from PyQt6.QtWidgets import QWidget
 
 from core import layout
@@ -163,6 +163,8 @@ class SheetView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.timeline: Timeline | None = None
+        # 「琴上没有的音」的缓存 —— 见 `set_timeline()` 里的说明
+        self._unmapped_bad: list[str] = []
         self.sec = 0.0
         self.preview_count = 5
         self.show_labels = True
@@ -208,7 +210,9 @@ class SheetView(QWidget):
         self.train_on = False
         self.train_seq: list[str] = []   # 摊平后的音名序列（控制台塞进来）
         self.train_i = 0                 # 练到第几个（0 = 还没点）
-        self.train_text = ''             # 进度那行字，如 "3 / 60"
+        # （`train_text` 删掉了：它存的是目标格下面那行 `3 / 60`，
+        #   而用户说过「不用显示还有多少个」。画它的 `_paint_train_hud()`
+        #   早就没了，这个字段只剩控制台还在往里写、全项目没人读。）
         # 训练序列里**每个音到下一个音的间隔**（秒），控制台塞进来。
         # 它就是"标记间隔时间"的数据源 —— 见下面的 `train_gap`。
         self.train_gaps: list[float] = []
@@ -228,12 +232,19 @@ class SheetView(QWidget):
         #     训练压根没在播放，`self.sec` 是冻的；要让圈动起来，
         #     只能挂真实时间。反正它跟谱面时间没有任何关系。
         self.train_gap = 0.0             # 当前音到下一个音的间隔（秒）
-        self.train_t0 = 0.0              # 当前音是什么时候点出来的
-        self._train_tick_t = QTimer(self)
-        self._train_tick_t.setInterval(16)      # ~60fps，圈看着才顺
-        self._train_tick_t.timeout.connect(self._on_train_tick)
+        # （这里原来还有一个 16ms 的 `_train_tick_t` 和一个 `train_t0`：
+        #   前者负责"让圈动起来"，但它**从来没有被 `.start()` 过** ——
+        #   圈现在由 `_train_frame()` 按真实时间算，压根不需要定时器；
+        #   后者是它的搭档（记"当前音是什么时候点出来的"），只写不读。）
         self._cur_stamp = 0.0            # 上一次「当前音换人」的时刻
-        self.flash: dict[str, float] = {}   # 实时跟弹：音高 -> 到期时刻
+        # 实时跟弹：音高 -> (到期时刻, 这一下的总时长)。
+        # ★ 为什么连**时长**一起存 ★
+        #   只存到期时刻的话，画的时候就没法知道"这一下总共闪多久"，
+        #   只能拿 `剩余 / 某个常数` 去估亮度。原来那个常数写死成 0.35，
+        #   而三个真实调用点给的是 0.25 / 0.28 / 0.15 —— 于是闪光
+        #   **一开始就只有 71% / 80% / 43% 的亮度**，越短的越暗，
+        #   跟"短促地啪一下"的意图正好相反。
+        self.flash: dict[str, tuple[float, float]] = {}
         self._flash_last: dict[str, float] = {}   # 每个键上次闪的时刻（防闪花眼）
         self.max_flash = 4                # 同时最多亮几个格子
         self._last_key = None            # 上一帧的绘制内容指纹（用于省重绘）
@@ -247,16 +258,20 @@ class SheetView(QWidget):
 
     def set_timeline(self, tl: Timeline | None):
         self.timeline = tl
+        # ★ 「琴上没有的音」在这里算一次就够了 ★
+        #   它只取决于谱面内容，跟"播到第几秒"毫无关系 ——
+        #   原来是在 `_paint_unmapped_hint()` 里**每帧现算**的：
+        #   那要遍历整首曲子的所有音（`tl.all_pitches()` 每次都新建一个
+        #   list），再对**每个音**做一次跨 16 格的线性查找。
+        #   几百个音的谱子一帧就是几千次字符串比较，而浮窗上有收缩圈时
+        #   是 8 ms 重绘一次（125fps）—— 白烧 CPU，画出来还一模一样。
+        self._unmapped_bad = _unmapped(tl) if tl else []
         self._last_key = None
         self.update()
 
-    def set_time(self, sec: float):
-        self.sec = sec
-        self.update()
-
-    # ---- ★ 透视贴合 ★ ----
-
-    # ---- 工具 ----
+    # （`set_time()` 和一行 `# ---- ★ 透视贴合 ★ ----` 的残留标题删掉了。
+    #   贴合整套砍掉之后 `SheetView` 只剩 `GridView` 一个使用者，
+    #   而它自己覆写了 `set_time` —— 基类这一份全项目没人调得到。）
 
     def _panel(self, p: QPainter):
         w, h = self.width(), self.height()
@@ -365,12 +380,14 @@ class SheetView(QWidget):
         if now - self._flash_last.get(pitch, 0.0) < min_gap:
             return                       # 同一个键刚闪过，别闪第二下
         self._flash_last[pitch] = now
-        self.flash[pitch] = now + max(0.1, float(seconds))
+        dur = max(0.1, float(seconds))
+        self.flash[pitch] = (now + dur, dur)
         # ★ 同时高亮的格子数设个上限 ★
         #   弹快的时候高亮会在屏幕上叠起来，看着就像「按一下亮了一堆」。
         #   超过上限就把最早到期的几个踢掉 —— 反正它们也快灭了。
         if len(self.flash) > self.max_flash:
-            for p, _e in sorted(self.flash.items(), key=lambda kv: kv[1]
+            for p, _e in sorted(self.flash.items(),
+                                key=lambda kv: kv[1][0]
                                 )[:len(self.flash) - self.max_flash]:
                 del self.flash[p]
         self._last_key = None
@@ -387,7 +404,7 @@ class SheetView(QWidget):
         """
         now = time.monotonic()
         for p in list(self.flash):
-            if self.flash[p] <= now:
+            if self.flash[p][0] <= now:
                 del self.flash[p]
         # 「当前格闪一下」也算：闪完得有人来把它擦掉
         return bool(self.flash) or self.current_blinking()
@@ -564,10 +581,10 @@ class _Frame:
     w: float
     h: float
     cell: float
-    # 网格外框的边长（4 格 + 3 个 `T.GAP`）。
-    #   （透视贴合删掉之前，用户拖的四个角对应的正是这块区域；
-    #    现在没有贴合了，它就是"网格自己那块正方形"的边长。）
-    side: float
+    # （这里原来还有个 `side` 字段：「网格外框的边长」，4 格 + 3 个 T.GAP。
+    #   那是"透视贴合"时代的产物 —— 用户拖的四个角对应的正是这块区域。
+    #   贴合整套砍掉之后**全项目再没有人读它**，只剩下面两个构造函数
+    #   还往里塞。局部变量 `side` 留着，因为 `cell` 是用它算出来的。）
     ox: float
     oy: float
     # [(格子列表, 是否休止, 音名)] —— 形状跟 `_current_group()` 一致
@@ -728,7 +745,9 @@ class GridView(SheetView):
                 self._paint_flash(p)
                 return
             self._paint_cells(p, tf)
-            self._paint_hot_flash(p, tf)
+            # （这里原来还有一行 `_paint_hot_flash(p, tf)` ——
+            #   `_train_frame()` 固定 `hot_flash=False`，而
+            #   `_paint_hot_flash()` 一进门就 `return`，纯空转。）
             self._paint_flash(p)
             self._paint_rings(p, tf)
             self._paint_labels(p, tf)
@@ -817,7 +836,7 @@ class GridView(SheetView):
         # 常亮（该弹这个）和闪一下（就是现在）**不冲突**，两个都要显示
         blinking = self.mark_current or hot_flash
         return _Frame(
-            w=w, h=h, cell=cell, side=side, ox=ox, oy=oy,
+            w=w, h=h, cell=cell, ox=ox, oy=oy,
             group=group, timed=self._upcoming_timed(),
             # 每个格子 -> 它在预览里的**所有**序号（0 = 当前）
             # （细节见 `cell_orders()` 的注释 —— 这里踩过"连按同一个键
@@ -965,7 +984,7 @@ class GridView(SheetView):
         timed: list = []
 
         return _Frame(
-            w=w, h=h, cell=cell, side=side, ox=ox, oy=oy,
+            w=w, h=h, cell=cell, ox=ox, oy=oy,
             group=group, timed=timed,
             orders=cell_orders(group),
             blinking=True,            # 提示层开着：序号角标要显示
@@ -984,18 +1003,11 @@ class GridView(SheetView):
     #     `3 / 60` 是**总数**（还剩多少工作量）—— 对弹琴没有任何帮助；
     #     角标是**位置**（下一个按哪儿）—— 那才是要看的。
     #   删掉之后目标格下半部正好空出来，`PAD N` 那行反而看得更清楚了。
-
-    def _train_gap_at(self, idx: int) -> float:
-        """训练序列里第 `idx` 个音到下一个音的间隔（秒）。
-
-        来源是控制台开训练时算好的 `train_gaps` ——
-        就是原谱面里相邻两个 `start_sec` 之差。
-        训练不看时间，但**间隔**是曲子的一部分，得留着：
-        它就是用户要的"标记间隔时间"。
-        """
-        if 0 <= idx < len(self.train_gaps):
-            return max(0.15, float(self.train_gaps[idx]))
-        return max(0.15, float(self.train_gap))
+    #
+    #   ★ 顺带删掉了 `_train_gap_at()` ★
+    #     它是那行字的数据源（"第 idx 个音到下一个音还有多久"）。
+    #     可它自己也从来没被调用过 —— 圈现在由 `_train_frame()` 直接取
+    #     `train_gaps[idx]` 算，中间多绕这一层没有任何意义。
 
     def train_start(self, i: int, gap: float):
         """控制台点对了一个音 —— 从这一刻重新起算。
@@ -1004,14 +1016,6 @@ class GridView(SheetView):
         """
         self.train_i = int(i)
         self.train_gap = max(0.15, float(gap))
-        self.train_t0 = time.monotonic()
-
-    def _on_train_tick(self):
-        """训练时那个 16ms 的小定时器 —— 只为了让圈动起来。"""
-        if not self.train_on or not self.isVisible():
-            self._train_tick_t.stop()
-            return
-        self.update()
 
     def mousePressEvent(self, event):
         """「可按」打开时，点哪个格子就出哪个音。
@@ -1679,7 +1683,8 @@ class GridView(SheetView):
         ox, oy, cell = self._geom()
         out: list[tuple[QRectF, float]] = []
         for fp in list(self.flash):
-            left = self.flash[fp] - now
+            exp, dur = self.flash[fp]
+            left = exp - now
             if left <= 0:
                 del self.flash[fp]
                 continue
@@ -1692,7 +1697,10 @@ class GridView(SheetView):
             # 闪的时候往外扩一点（跟原来 `_cell_rect(..., -cell*0.03)` 一致）
             r = r.adjusted(-cell * 0.03, -cell * 0.03,
                            cell * 0.03, cell * 0.03)
-            out.append((r, min(1.0, left / 0.35)))
+            # ★ 拿**这一下自己的时长**归一化，不是写死的 0.35 ★
+            #   这样 `set_flash(seconds=...)` 才真的说了算：
+            #   进来就是满亮，然后一路线性消退到 0。
+            out.append((r, min(1.0, left / dur)))
         return out
 
     def _paint_flash(self, p: QPainter):
@@ -1747,8 +1755,11 @@ class GridView(SheetView):
     # -- 底部提示 --
 
     def _paint_unmapped_hint(self, p: QPainter, f: _Frame):
-        """谱子里有琴弹不出来的音时，底部给个红框提示。"""
-        bad = _unmapped(self.timeline)
+        """谱子里有琴弹不出来的音时，底部给个红框提示。
+
+        取的是 `set_timeline()` 算好的缓存，不在这儿现算 —— 原因见那边。
+        """
+        bad = self._unmapped_bad
         if not bad:
             return
         msg = '琴上没有这些音，会被跳过：' + ' '.join(bad[:6])
@@ -1763,12 +1774,6 @@ class GridView(SheetView):
 
 
 # ---------------- 小工具 ----------------
-
-def _fmt(x: float) -> str:
-    if abs(x - round(x)) < 1e-9:
-        return str(int(round(x)))
-    return '%g' % x
-
 
 def _fit_font(size: float, bold: bool = False) -> QFont:
     f = QFont()

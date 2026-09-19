@@ -32,7 +32,8 @@ import os
 import tempfile
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap, QPolygonF
+from PyQt6.QtGui import (QColor, QFont, QPainter, QPainterPath, QPen, QPixmap,
+                         QPolygonF)
 
 # ---------------- 调色板 ----------------
 #
@@ -241,7 +242,11 @@ def sound_icon(on: bool, size: int = 16) -> str:
 
 
 def _bar_icon(kind: str, color: str, size: int = 16) -> str:
-    """浮窗控制条上的小图标：`list` / `play` / `pause`。"""
+    """画一颗小图标：`list` / `play` / `pause` / `stop` / `back` / `record`。
+
+    全部按 14×14 的网格设计，实心块用填充、其余的用与文字同色的线条。
+    浮窗控制条和控制台/制谱器的播放按钮共用这一套。
+    """
     key = 'bar_%s_%s_%d' % (kind, color.lstrip('#'), size)
     hit = _ICON_CACHE.get(key)
     if hit:
@@ -269,6 +274,27 @@ def _bar_icon(kind: str, color: str, size: int = 16) -> str:
                               1.0 * s, 1.0 * s)
             p.drawRoundedRect(QRectF(7.7 * s, 2.9 * s, 2.3 * s, 8.2 * s),
                               1.0 * s, 1.0 * s)
+        elif kind == 'stop':
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(col)
+            p.drawRoundedRect(QRectF(3.4 * s, 3.4 * s, 7.2 * s, 7.2 * s),
+                              1.5 * s, 1.5 * s)
+        elif kind == 'back':
+            # 「回到开头」= 左边一堵墙 + 一个指着它的三角
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(col)
+            p.drawRoundedRect(QRectF(2.5 * s, 3.1 * s, 1.8 * s, 7.8 * s),
+                              0.9 * s, 0.9 * s)
+            p.drawPolygon(QPolygonF([
+                QPointF(12.0 * s, 3.1 * s),
+                QPointF(5.5 * s, 7.0 * s),
+                QPointF(12.0 * s, 10.9 * s),
+            ]))
+        elif kind == 'record':
+            # 「手动演奏」= 一个实心圆点（录音键那个样子）
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(col)
+            p.drawEllipse(QRectF(4.2 * s, 4.2 * s, 5.6 * s, 5.6 * s))
         else:                                   # list —— 「选曲」
             pen = QPen(col)
             pen.setWidthF(1.7 * s)
@@ -297,6 +323,41 @@ def bar_icon(kind: str, size: int = 15) -> str:
       画出来还顺手解决了另一半风险：不赌系统装了什么字体。
     """
     return _bar_icon(kind, TEXT, size)
+
+
+# ★ 控制台 / 制谱器的播放按钮，跟浮窗那颗走同一套图 ★
+#
+#   这两处原来直接在按钮文字里写着 `▶ 播放` / `⏹ 停止` / `⏮ 回到开头` ——
+#   跟浮窗那颗 ⏸ 是**同一批** Emoji_Presentation 字符：真机上会被系统
+#   换成彩色 emoji（用户截图里就是几个**蓝色小方块**），跟旁边自己画的
+#   线性图标完全是两个体系。浮窗那边早就改掉了，控制台一直漏着。
+#
+#   既然 `_bar_icon()` 已经会画 play / pause，这里把 stop / back 补齐，
+#   两边从此是同一份代码画出来的。
+
+def play_icon(size: int = 13) -> str:
+    """「播放」那颗按钮的三角。"""
+    return _bar_icon('play', TEXT, size)
+
+
+def pause_icon(size: int = 13) -> str:
+    """「暂停」那颗按钮的双竖条（播放中切换过去）。"""
+    return _bar_icon('pause', TEXT, size)
+
+
+def stop_icon(size: int = 13) -> str:
+    """「停止」那颗按钮的方块。"""
+    return _bar_icon('stop', TEXT, size)
+
+
+def back_icon(size: int = 13) -> str:
+    """「回到开头」那颗按钮的图标。"""
+    return _bar_icon('back', TEXT, size)
+
+
+def record_icon(size: int = 15) -> str:
+    """「手动演奏」那颗按钮的圆点（红色 = 在录）。"""
+    return _bar_icon('record', DANGER, size)
 
 
 def _trash_icon(color: str, size: int = 15) -> str:
@@ -354,6 +415,145 @@ def trash_icon(size: int = 15) -> str:
       「这个垃圾桶的图标不明显」。
     """
     return _trash_icon(DANGER, size)
+
+
+# ---------------- 控制台 / 制谱器用的小图标 ----------------
+#
+# ★ 这一组是来"补漏"的 ★
+#   浮窗那几颗按钮早在 `bar_icon()` 里就吃过一次亏了，那边的注释写得很
+#   清楚：📚 / ▶ / ⏸ 在真机上会被系统换成**彩色 emoji**，压在深色控制条
+#   上很跳，所以干脆自己画。可**控制台和制谱器里漏掉了几处**，一直没发
+#   现 —— 直到把窗口截下来放大看：
+#     · 「📜 跟谱面」—— 一个橙色的小卷轴
+#     · 「📂 文件夹」—— 一个明黄色的文件夹
+#     · 「📚 曲谱」（侧栏标题）、「🎮 卡丘在前台」（状态栏）
+#     · 制谱器的「🎹 手动演奏」「🗑 删除并靠齐 / 删除留空」
+#   它们全是彩色 emoji，跟旁边自己画的单色线性图标（喇叭、垃圾桶、
+#   播放三角）摆在一起，一眼就是两个体系。
+#
+#   所以这一组的职责只有一个：把剩下那几个 emoji 换成同一套画法。
+#   默认色统一取 `TEXT` —— 跟按钮文字同色，也就是 `bar_icon()` 的做法。
+
+
+def _cached_png(prefix: str, parts: list[str], size: int, draw) -> str:
+    """画一张小图并返回它的路径（正斜杠，QSS 和 QIcon 都能直接用）。
+
+    `draw(painter, s)` 里只管画，`s = size / 14.0` 是缩放系数 ——
+    所有图标都按 14×14 的网格设计，换尺寸时乘 `s` 就行。
+
+    ★ 为什么要抽这一段 ★
+      原本每个图标函数都把这七行抄了一遍：
+        查缓存 → 拼路径 → 文件在不在 → 建 QPixmap → 开 QPainter
+        → 存盘 → 回填缓存
+      六个函数就是四十多行复制粘贴，而且加一个新图标还得再抄一遍 ——
+      抄漏一步（比如忘了 `setRenderHint`）画出来就是毛边的，
+      却很难看出跟别人差在哪。现在只有一个地方需要写对。
+    """
+    key = '%s_%s_%d' % (prefix, '_'.join(parts), size)
+    hit = _ICON_CACHE.get(key)
+    if hit:
+        return hit
+    path = os.path.join(_icon_dir(), key + '.png')
+    if not os.path.exists(path):
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        draw(p, size / 14.0)
+        p.end()
+        pm.save(path, 'PNG')
+    out = path.replace('\\', '/')
+    _ICON_CACHE[key] = out
+    return out
+
+
+def _stroke(p, color: QColor, s: float, width: float = 1.5) -> QPen:
+    """把画笔设成这一套图标统一的线型：圆头、圆角、只描边不填充。"""
+    pen = QPen(color)
+    pen.setWidthF(width * s)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    return pen
+
+
+def _folder_icon(color: str, size: int = 15) -> str:
+    """画一个文件夹（「打开 sheets 文件夹」用）。"""
+    def draw(p, s):
+        _stroke(p, QColor(color), s, 1.4)
+        path = QPainterPath()
+        path.moveTo(2.0 * s, 11.7 * s)
+        path.lineTo(2.0 * s, 3.3 * s)
+        path.lineTo(5.6 * s, 3.3 * s)
+        path.lineTo(7.0 * s, 5.3 * s)     # 右上那个折角 = 文件夹的舌头
+        path.lineTo(12.0 * s, 5.3 * s)
+        path.lineTo(12.0 * s, 11.7 * s)
+        path.closeSubpath()
+        p.drawPath(path)
+    return _cached_png('folder', [color.lstrip('#')], size, draw)
+
+
+def _note_icon(color: str, size: int = 15) -> str:
+    """画一个八分音符（「跟谱面」用）。
+
+    ★ 为什么是音符，不是"播放"或"卷轴" ★
+      这个按钮的语义是"谱面自己往前走、你跟着弹"，图标只要说明
+      **这是跟音乐有关的**就够了 —— 具体意思由按钮文字「跟谱面」承担。
+      所以不能画成播放三角（旁边「▶ 播放」已经是了，两个按钮会撞脸）。
+    """
+    def draw(p, s):
+        col = QColor(color)
+        # 符头：压扁的椭圆，稍微斜一点（正圆看着像颗豆子）
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(col)
+        p.save()
+        p.translate(4.5 * s, 10.4 * s)
+        p.rotate(-20)
+        p.drawEllipse(QRectF(-2.4 * s, -1.75 * s, 4.8 * s, 3.5 * s))
+        p.restore()
+        # 符干 + 符尾（一根竖线，顶上向右下甩一撇）
+        _stroke(p, col, s, 1.5)
+        p.drawLine(QPointF(6.8 * s, 10.4 * s), QPointF(6.8 * s, 2.5 * s))
+        p.drawPolyline([
+            QPointF(6.8 * s, 2.5 * s),
+            QPointF(11.2 * s, 4.1 * s),
+            QPointF(11.2 * s, 6.9 * s),
+        ])
+    return _cached_png('note', [color.lstrip('#')], size, draw)
+
+
+def _piano_icon(color: str, size: int = 15) -> str:
+    """画一个小键盘（制谱器的「手动演奏」用）。"""
+    def draw(p, s):
+        col = QColor(color)
+        _stroke(p, col, s, 1.35)
+        p.drawRoundedRect(QRectF(1.9 * s, 3.5 * s, 10.2 * s, 7.0 * s),
+                          1.0 * s, 1.0 * s)
+        # 白键的分隔线
+        for x in (4.4, 6.9, 9.4):
+            p.drawLine(QPointF(x * s, 3.5 * s), QPointF(x * s, 10.5 * s))
+        # 黑键：实心小方块，从上边框往下探
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(col)
+        for x in (3.35, 5.85, 8.35):
+            p.drawRect(QRectF(x * s, 3.5 * s, 1.5 * s, 4.0 * s))
+    return _cached_png('piano', [color.lstrip('#')], size, draw)
+
+
+def folder_icon(size: int = 15) -> str:
+    """「文件夹」那颗按钮的图标 —— `ui/control_build.py` / 右键菜单用。"""
+    return _folder_icon(TEXT, size)
+
+
+def note_icon(size: int = 15) -> str:
+    """「跟谱面」那颗按钮的图标 —— `ui/control_build.py` 用。"""
+    return _note_icon(TEXT, size)
+
+
+def piano_icon(size: int = 15) -> str:
+    """制谱器「手动演奏」那颗按钮的图标 —— `ui/editor.py` 用。"""
+    return _piano_icon(TEXT, size)
 
 
 # ---------------- 样式表 ----------------

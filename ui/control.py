@@ -5,17 +5,14 @@ from __future__ import annotations
 
 import os
 import subprocess
-import time
 
-import numpy as np
 
-from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QCursor, QKeySequence, QShortcut
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QCursor, QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog,
-    QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
+    QApplication, QFileDialog,
+    QInputDialog, QLineEdit,
+    QListWidgetItem, QMainWindow, QMenu, QMessageBox,
 )
 
 from core import follower, layout, parser, timeline, winfocus
@@ -24,8 +21,7 @@ from core.paths import APP_NAME, all_sheets, bundled_dir, sheets_dir
 from . import appstyle, config
 from .control_build import BuilderMixin
 from .editor import EditorDialog
-from .hotkeys import (HK_PLAYPAUSE, HK_RESTART, HK_TOGGLE, HotkeyEdit,
-                      HotkeyManager, parse_binding)
+from .hotkeys import (HK_PLAYPAUSE, HK_RESTART, HK_TOGGLE, HotkeyManager, parse_binding)
 from .keypad import NotePlayer
 from .overlay import OverlayWindow, Player, TrainWindow
 
@@ -374,6 +370,19 @@ class ControlWindow(BuilderMixin, QMainWindow):
           （"保存后刷新"那一小段本来写在 `exec()` 后面 ——
            非模态没有那一刻了，挪进关闭回调。）
         """
+        # ★ 已经在编辑了，就先把旧的关掉 ★
+        #   不关的话屏幕上会并排站着两个制谱器，而控制台只认最后那个 ——
+        #   前一个还在跑它自己那两颗定时器（`_blink` 40ms / `_watch` 150ms），
+        #   在里面改完保存也不会回到控制台。
+        #   `close()` 会同步走到它的 `closeEvent` → 补发 `finished`
+        #   → 控制台的 `_on_closed` 把上一个收拾干净。
+        old = getattr(self, '_editor', None)
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+
         dlg = EditorDialog(self.path, self)
         dlg.setModal(False)
         self._editor = dlg
@@ -397,7 +406,13 @@ class ControlWindow(BuilderMixin, QMainWindow):
 
     def _close_editor(self, dlg):
         """制谱器关掉 —— 浮窗还回控制台自己载入的那份谱面。"""
-        if getattr(self, '_editor', None) is None:
+        # ★ 认的是"当前这一个"，不是"有没有" ★
+        #   原来只判 `_editor` 是不是 None。可连着点两次「编辑谱面」
+        #   会开出**两个**制谱器（第二个还没关），这时候关掉第一个，
+        #   `_editor` 就被清成 None 了 —— 第二个明明还在屏幕上，
+        #   控制台却已经不认它：浮窗不再跟着它走，它保存完也不刷新。
+        #   按身份比对，谁的关闭事件就清谁。
+        if getattr(self, '_editor', None) is not dlg:
             return
         self._editor = None
         self._editor_tl = None
@@ -676,12 +691,18 @@ class ControlWindow(BuilderMixin, QMainWindow):
             return
         menu = QMenu(self)
         builtin = self._is_builtin(path)
-        act_del = menu.addAction('🗑  删掉这份谱面')
+        # ★ 菜单里这两项的图标也换成自己画的 ★
+        #   原来写的是 `🗑` / `📂` 两个 emoji，真机上会被系统换成
+        #   **彩色**的垃圾桶和文件夹 —— 跟旁边那颗自己画的红色垃圾桶
+        #   （`control_build.py` 里那颗）摆在一起就是两个体系。
+        act_del = menu.addAction('删掉这份谱面')
+        act_del.setIcon(QIcon(appstyle.trash_icon(15)))
         act_del.setEnabled(not builtin)
         if builtin:
             act_del.setToolTip('内置谱面删不掉')
         menu.addSeparator()
-        act_reveal = menu.addAction('📂  在文件夹里显示')
+        act_reveal = menu.addAction('在文件夹里显示')
+        act_reveal.setIcon(QIcon(appstyle.folder_icon(15)))
         picked = menu.exec(lst.viewport().mapToGlobal(pos))
         if picked is None:
             return
@@ -1107,8 +1128,11 @@ class ControlWindow(BuilderMixin, QMainWindow):
                max(0, idx + 1), len(self.tl)))
 
     def _on_state(self, playing: bool):
-        self.btn_play.setText('⏸  暂停' if playing else '▶  播放')
-        # 浮窗顶上那颗按钮也跟着切 ▶ / ⏸
+        # 图标跟着一起切 —— 原来切的是文字里那个 ▶/⏸ 字符
+        self.btn_play.setText('暂停' if playing else '播放')
+        self.btn_play.setIcon(QIcon(appstyle.pause_icon(13)
+                                    if playing else appstyle.play_icon(13)))
+        # 浮窗顶上那颗按钮也跟着切 ▶ / ⏸（两张图同样是自己画的）
         self.overlay.set_playing(playing)
 
     # ------------------------------------------------------------------
@@ -1216,7 +1240,11 @@ class ControlWindow(BuilderMixin, QMainWindow):
             state = '浮窗已关闭'
         else:
             state = '浮窗显示中'
-        txt = '%s　%s　→　%s' % ('🎮 卡丘在前台' if in_game else '…不是卡丘',
+        # ★ 这里原来有个 🎮 ★
+        #   它是这条状态行里唯一的彩色 emoji，而"是不是卡丘在前台"
+        #   本来就由后面的窗口标题说清楚了 —— 图标不但没帮忙，
+        #   还在深色状态栏上跳出来一块。
+        txt = '%s　%s　→　%s' % ('卡丘在前台' if in_game else '…不是卡丘',
                                 winfocus.describe_foreground(), state)
         if txt != self.lbl_fg.text():
             self.lbl_fg.setText(txt)
@@ -1288,7 +1316,7 @@ class ControlWindow(BuilderMixin, QMainWindow):
         """
         if self.player.playing:
             self.player.pause()
-            self.btn_live.setText('📜 跟谱面')
+            self.btn_live.setText('跟谱面')
             self.lbl_live.setText('跟谱面：已停')
             self.statusBar().showMessage('跟谱面已停')
             return
@@ -1304,7 +1332,7 @@ class ControlWindow(BuilderMixin, QMainWindow):
         self.overlay.clear_flash()
         self.player.seek(0.0)
         self.player.play()
-        self.btn_live.setText('⏹ 停止跟谱面')
+        self.btn_live.setText('停止跟谱面')
         self.lbl_live.setText('跟谱面：按谱面时间走 —— 你跟着它弹')
         self.statusBar().showMessage('跟谱面中 —— 浮窗会按谱面时间依次亮键')
 
@@ -1452,7 +1480,13 @@ class ControlWindow(BuilderMixin, QMainWindow):
             chk.blockSignals(False)
 
         last = cfg.get('last_sheet')
-        if not (last and os.path.isfile(last)):
+        # ★ `isinstance` 是第二道防线 ★
+        #   `config.normalise()` 已经保证 `last_sheet` 是 str 了。但这里
+        #   在 `ControlWindow.__init__` 里，而 `main.py` 构造它时没有 try ——
+        #   `os.path.isfile({})` 抛的 TypeError 会一路窜到顶层，
+        #   **窗口根本不出现，双击了没反应，连个报错框都没有**。
+        #   两道防线都留着，这类"改配置文件把程序锁死"就再没有入口。
+        if not (isinstance(last, str) and last and os.path.isfile(last)):
             demo = os.path.join(sheets_dir(), 'demo.txt')
             last = demo if os.path.isfile(demo) else None
         if last:
@@ -1465,12 +1499,39 @@ class ControlWindow(BuilderMixin, QMainWindow):
         if cfg['sound']:
             self._set_sound(True)
 
-    def _save_config(self):
-        """把当前界面状态存回配置文件。
+    def _save_config(self, now: bool = False):
+        """把当前界面状态存回配置文件 —— **默认合并，不是立刻写**。
 
         字段名集中在 `ui/config.py` 的 `DEFAULTS` 里定义，
         这里只做"控件 → dict"的映射。
+
+        ★ 为什么要合并 ★
+          拖一下「大小」滑块会连着设 `sp_w` / `sp_h`，而它们各自都会
+          触发 `_apply_geometry()`，末尾就是一次落盘。实测拖 30 步
+          会调用 `config.save()` **58 次** —— 而每次都是
+          `mkstemp` + `os.replace`（先写临时文件再原子替换），
+          全部发生在用户手指底下。
+
+          现在改成"最后一次改动之后 400ms 才真写"：连续拖动只写一次，
+          松手 0.4 秒内一定落盘。手感上完全感觉不到差别，
+          磁盘上少几十次无谓的写入。
+
+        ★ 关窗时必须传 `now=True` ★
+          不然刚拖完就关程序，那个 400ms 的定时器还没到点就被销毁，
+          最后一次改动会**丢掉**（下次启动跳回旧位置）。
         """
+        if now:
+            self._flush_config()
+            return
+        if getattr(self, '_save_timer', None) is None:
+            self._save_timer = QTimer(self)
+            self._save_timer.setSingleShot(True)
+            self._save_timer.setInterval(400)
+            self._save_timer.timeout.connect(self._flush_config)
+        self._save_timer.start()          # 每来一次就重新计时
+
+    def _flush_config(self):
+        """真正落盘那一下（`_save_config` 合并之后调它）。"""
         config.save({
             'x': self.sp_x.value(), 'y': self.sp_y.value(),
             'w': self.sp_w.value(), 'h': self.sp_h.value(),
@@ -1501,7 +1562,9 @@ class ControlWindow(BuilderMixin, QMainWindow):
             self.hotkeys.unbind_all()
         except Exception:
             pass
-        self._save_config()
+        # ★ `now=True`：这个 400ms 的合并定时器马上就没机会跑完了 ★
+        #   （窗口一关，它跟着被销毁）—— 不立刻写就会丢最后一次改动。
+        self._save_config(now=True)
         self.overlay.hide()
         self.overlay.close()
         event.accept()

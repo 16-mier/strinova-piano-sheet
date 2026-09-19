@@ -15,16 +15,17 @@ from __future__ import annotations
 import os
 import re
 
-from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
+from PyQt6.QtCore import QSettings, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import (QColor, QFont, QIcon, QSyntaxHighlighter,
+                         QTextCharFormat)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QSplitter, QTextEdit, QVBoxLayout, QWidget,
+    QScrollArea, QSplitter, QTextEdit, QVBoxLayout,
 )
 
 from core import encode, layout, parser, timeline
-from core.edit_model import SPB, EdNote, EditModel, pitch_order
+from core.edit_model import SPB, EditModel, pitch_order
 
 from . import appstyle, theme as T
 from .edit_player import EditPlayer
@@ -289,7 +290,12 @@ class EditorDialog(QDialog):
         #     先点开启、再跑过去按第一个音，中间那段时间差不固定，
         #     录出来整段就飘了。所以开启之后先**等**：你按下的第一个音
         #     就是起点，时间轴从那一刻才开始走。
-        self.btn_rec = QPushButton('🎹  手动演奏')
+        self.btn_rec = QPushButton('手动演奏')
+        # ★ 图标自己画，不是 🎹 ★
+        #   它跟浮窗控制条上那几颗是同一类字符：真机上会被系统换成
+        #   **彩色 emoji**，压在深色按钮上跟旁边自己画的图标不是一套。
+        self.btn_rec.setIcon(QIcon(appstyle.record_icon(15)))
+        self.btn_rec.setIconSize(QSize(15, 15))
         self.btn_rec.setObjectName('record')
         self.btn_rec.setCheckable(True)       # 开关样：开着的时候整块变红
         # ★ 高度：它现在是**独立一行的大按钮** ★（放到 `root` 里去了，
@@ -482,13 +488,21 @@ class EditorDialog(QDialog):
 
         tlb.addWidget(self.tl_scroll, 1)
 
-        self.btn_play = QPushButton('▶  从这里播')
+        # ★ 三颗按钮的图标自己画 ★（原来写的是 ▶ / ⏹ / ⏮ 三个字符，
+        #   真机上会被系统换成彩色 emoji —— 跟控制台那边是同一个坑）
+        self.btn_play = QPushButton('从这里播')
+        self.btn_play.setIcon(QIcon(appstyle.play_icon(13)))
+        self.btn_play.setIconSize(QSize(13, 13))
         self.btn_play.setFixedHeight(30)
         self.btn_play.setToolTip('从播放头开始播　（空格键也能播 / 停）')
-        self.btn_stop = QPushButton('⏹  停止')
+        self.btn_stop = QPushButton('停止')
+        self.btn_stop.setIcon(QIcon(appstyle.stop_icon(13)))
+        self.btn_stop.setIconSize(QSize(13, 13))
         self.btn_stop.setFixedHeight(30)
         self.btn_stop.setToolTip('停住，播放头留在原地 —— 再按空格从这儿接着播')
-        self.btn_home = QPushButton('⏮  回到开头')
+        self.btn_home = QPushButton('回到开头')
+        self.btn_home.setIcon(QIcon(appstyle.back_icon(13)))
+        self.btn_home.setIconSize(QSize(13, 13))
         self.btn_home.setFixedHeight(30)
         self.btn_home.setToolTip('播放头回到开头（0 秒）')
 
@@ -504,11 +518,15 @@ class EditorDialog(QDialog):
         #     · 靠齐（剪切）—— 删完立刻接上，做"这段不要了、后面顶上来"
         #     · 留空（挖掉）—— 后面的原地不动，那段变成空的
         #   两个都是常用操作、谁也当不了默认，所以并排放。
-        self.btn_del_sel = QPushButton('🗑  删除并靠齐')
+        self.btn_del_sel = QPushButton('删除并靠齐')
+        self.btn_del_sel.setIcon(QIcon(appstyle.trash_icon(15)))
+        self.btn_del_sel.setIconSize(QSize(15, 15))
         self.btn_del_sel.setToolTip(
             '删掉框选范围内的方块，后面的**往前接上**（不留空档）。\n'
             '先框选：在时间轴空白处拖一段。')
-        self.btn_del_keep = QPushButton('🗑  删除留空')
+        self.btn_del_keep = QPushButton('删除留空')
+        self.btn_del_keep.setIcon(QIcon(appstyle.trash_icon(15)))
+        self.btn_del_keep.setIconSize(QSize(15, 15))
         self.btn_del_keep.setToolTip(
             '只删框选范围内的方块，后面的**原地不动**（那段变成空的）。')
         self.btn_sel_all = QPushButton('全选')
@@ -727,7 +745,7 @@ class EditorDialog(QDialog):
         QTimer.singleShot(0, self._rec_start)
         # 真的开始录了 —— 变红
         self._set_recording(True)
-        self.btn_rec.setText('🎹  演奏中…')
+        self.btn_rec.setText('演奏中…')
         self.lbl_pos.setText(
             '手动演奏中… 从 <b>%.2f</b> 秒开始（红线在哪儿就从哪儿录），'
             '再点一下「手动演奏」停' % self._rec_from)
@@ -1065,7 +1083,7 @@ class EditorDialog(QDialog):
         self.btn_rec.setChecked(True)
         # 待命态 —— 蓝的（还没开始录），等第一个音按下去才变红
         self._set_recording(False)
-        self.btn_rec.setText('🎹  等第一个音…')
+        self.btn_rec.setText('等第一个音…')
         self.lbl_pos.setText(
             '手动演奏：按第一个音就开始计时，它会落在 <b>%.2f</b> 秒'
             '（想从别处开始，先把红线拖过去）' % self.tl_edit.playhead)
@@ -1094,7 +1112,7 @@ class EditorDialog(QDialog):
         self._stop_playback()
         self.btn_rec.setChecked(False)
         self._set_recording(False)
-        self.btn_rec.setText('🎹  手动演奏')
+        self.btn_rec.setText('手动演奏')
         self.lbl_pos.setText('手动演奏已关闭（写下来的音都留着）')
 
     def _toggle_play(self):
@@ -1327,6 +1345,15 @@ class EditorDialog(QDialog):
             '谱面文件 (*.txt);;所有文件 (*)')
         if not path:
             return False
+        # ★ 没写扩展名就补一个 `.txt` ★
+        #   `core/paths.py::all_sheets()` 只认 `*.txt`。存成
+        #   `sheets/新谱面`（没有后缀）的话，侧栏、下拉框、浮窗的选曲菜单
+        #   **全都列不出它** —— 用户看到的是"保存了但哪儿都找不到"，
+        #   只能自己进文件夹确认文件其实在。
+        #   Windows 的保存对话框在「所有文件」那一档不会自动补后缀，
+        #   所以必须自己来。
+        if not path.lower().endswith('.txt'):
+            path += '.txt'
         self.path = path
         return self.save()
 
@@ -1445,3 +1472,20 @@ class EditorDialog(QDialog):
         self._debounce.stop()
         self.player.stop()
         super().closeEvent(event)
+        # ★ 补发一发 `finished` ★
+        #   控制台是用 `dlg.finished.connect(_on_closed)` 来接管"关掉之后
+        #   该干什么"的：把浮窗还回控制台自己那份谱面、刷新曲库、
+        #   如果刚才保存过就重新载入它。
+        #
+        #   可这个对话框从头到尾**没有调过 `done()` / `accept()` /
+        #   `reject()`** —— 而 `QDialog.finished` 只在 `done()` 里发。
+        #   于是那条连接是一次都没响过的**死线**：
+        #     · 关掉制谱器之后 `_editor` 还指着这个已经关掉的窗口，
+        #       控制台以为它还开着（所以再点「编辑谱面」还能开出第二个）
+        #     · 在制谱器里改完保存，曲库不刷新、控制台也不载入新谱面，
+        #       用户回到控制台看到的还是旧的
+        #   在这里显式补一发，那条路才真的通。
+        #   （用 `event.isAccepted()` 挡一下：万一将来有人 reject 掉关闭，
+        #     就不该报"已经关了"。）
+        if event.isAccepted():
+            self.finished.emit(0)

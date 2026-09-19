@@ -44,6 +44,49 @@ def test_corrupt_json_falls_back_instead_of_raising(tmp_path):
     assert cfg['preview'] == 5
 
 
+def test_structured_value_for_string_field_never_leaks_out():
+    """`last_sheet` 必须是字符串 —— 否则主窗口根本起不来。
+
+    ★ 这两条测试是从一个真崩溃里长出来的 ★
+      `_as_str()` 原来对 list / tuple / dict **原样返回**，理由是
+      "热键那种结构化取值交给调用方解析"。可热键走的是另一个分支。
+
+      结果：用户在 config.json 里把 `"last_sheet"` 写成 `{}`，
+      dict 一路漏到 `os.path.isfile()` → TypeError → 而那次调用发生在
+      `ControlWindow.__init__` 里、`main.py` 没有 try →
+      **双击图标没反应，窗口永远不出现**。
+
+      改一个文本文件就能把程序锁死，所以这里逐个钉死。
+    """
+    for bad in ({}, [], ['a'], {'a': 1}, set(), 0, 1.5, True, None):
+        cfg = config.normalise({'last_sheet': bad})
+        assert isinstance(cfg['last_sheet'], str), '漏出了 %r' % (bad,)
+
+
+def test_huge_number_falls_back_instead_of_raising():
+    """`1e400` 读出来是 `inf`，而 `int(inf)` 抛的是 OverflowError。
+
+    它不是 TypeError / ValueError —— 只接那两个的话这条会漏过去，
+    后果跟上面一样是"窗口打不开"。
+    """
+    cfg = config.normalise({'w': 1e400, 'opacity': float('inf'),
+                            'countdown': float('nan')})
+    assert cfg['w'] == 470             # 全部退回默认值
+    assert cfg['opacity'] == 92
+    assert cfg['countdown'] == 3
+
+
+def test_hotkey_structured_values_still_pass_through():
+    """热键那类结构化取值该原样留着 —— 别被上面那次类型硬化误伤。
+
+    它们不在 `_STRINGS` / `_RANGES` / `_BOOLS` 任何一个里，
+    走的是 `normalise()` 最后那个 `else` 分支。
+    """
+    cfg = config.normalise({'hk_play': [1, 65], 'hk_restart': '不绑定'})
+    assert cfg['hk_play'] == [1, 65]
+    assert cfg['hk_restart'] == '不绑定'
+
+
 def test_wrong_types_are_coerced():
     # （`handle` 字段已经删了 —— 拖动手柄改成常驻，用户：
     #   「这个选项可以去掉，那个地方需要经常显示的」。

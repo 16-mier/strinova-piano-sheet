@@ -10067,6 +10067,254 @@ p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
 `99_flash_edge_on.png`（闪光中）：PAD 5 只多了两圈青边，
 `×2`、`0.3`/`0.8`、`PAD 5` 全都在。
 
+---
+
+## 16.76 ★ 一轮自主优化：先把整个项目量一遍，再动手 ★
+
+用户：「可以自己优化一下代码和整个项目，然后优化一下UI，看看哪些方案有
+更好的替代，给你时间」。
+
+这一轮**没有具体报错**，所以第一步不是改代码，而是先想办法把"哪里不好"
+变成**能数出来的东西**。用了四条互不依赖的线：
+
+1. `ruff 0.16.6` 静态扫描（得先把中文注释触发的规则排除掉，
+   否则 7300 条噪声里什么也看不见）
+2. 三份**只读**深度审计（`appstyle.py` / `views.py` / `control+editor`），
+   要求每一条都带行号 + 代码原文 + "确实没人引用"的 grep 证据
+3. **把界面截下来看** —— 这一条抓到的问题最多（见 16.76.1）
+4. 直接问 Qt：`minimumSizeHint()` 逐控件打出来，看窗口为什么缩不小
+
+下面按"用户能不能看见"排序，不按改动量排。
+
+### 16.76.1 界面上有 11 处彩色 emoji —— 而项目早就为这件事立过规矩
+
+把控制窗截下来放大，一眼看到**四种图标**混在一起：自己画的单色线性图标
+（喇叭、垃圾桶、播放三角），外加一个橙色的小卷轴、一个明黄色的文件夹、
+两个蓝色小方块。
+
+查下去发现 `ui/appstyle.py::bar_icon()` 的文档里**白纸黑字写着**这件事：
+
+> ★ 为什么连 📚 / ▶ / ⏸ 这几个字符也要画出来 ★
+>   真机上它们**不是**字体里那一个字形，而是被系统换成**彩色 emoji**
+>   （微软雅黑没有，落到 Segoe UI Emoji 上了）……
+
+浮窗控制条那边早就照着改了，**控制台和制谱器漏了一大片**。
+
+★ 怎么一次找全，而不是漏一个改一个 ★
+  第一版扫描只查了 `U+1F000` 以上，结果漏掉了 `⏹ 停止跟谱面` 里的
+  `U+23F9` —— 它在"杂项技术符号"区，可一样会被换成彩色 emoji。
+
+  改成按 `unicodedata.category()` 扫：凡是非 ASCII 且 category 以 `S`
+  开头（Sm/Sk/Sc/So，各种符号）的字符**全部列出来**，再看它在什么
+  上下文里。全项目 53 种，逐个判：
+
+  | 保留（单色，渲染正常） | 换掉（会被换成彩色 emoji） |
+  |---|---|
+  | `★`(1313处，注释) `→` `←` `×` `─` `⠿`(拖动手柄) | `📜` `📂` `📚` `🎹` `🗑` `🎮` |
+  | `✓` `✗` `≥` `≤` `≈` `≠` `✚` `✦` `⚠` | `▶` `⏹` `⏮` `⏸` `⏺` |
+
+  分界线是 **Emoji_Presentation**：`✚`(U+271A) 默认是文本字形，
+  而 `⏹`(U+23F9)、`▶`(U+25B6) 默认就是 emoji —— 在 Windows 上
+  会被画成**彩色方块**。控制台上「停止」和「回到开头」变成两个蓝色小方块，
+  就是这么来的。
+
+★ 改法 ★
+  `ui/appstyle.py` 里补了一批同风格的图标，全部走同一个新骨架：
+
+  - 新建 `_cached_png(prefix, parts, size, draw)` —— 把六个图标函数里
+    各抄了一遍的**七行样板**（查缓存 → 拼路径 → 文件在不在 → 建 QPixmap
+    → 开 QPainter → 存盘 → 回填缓存）收成一处。加一个新图标不用再抄，
+    也不会再抄漏 `setRenderHint`（漏了画出来就是毛边的）。
+  - `_bar_icon()` 补了 `stop` / `back` / `record` 三种 kind
+    （原来只有 `list` / `play` / `pause`）。
+  - 新增 `folder` / `note` / `piano` 三个图标。
+  - 对外统一成 `play_icon()` / `pause_icon()` / `stop_icon()` /
+    `back_icon()` / `record_icon()` / `folder_icon()` / `note_icon()` /
+    `piano_icon()`。
+
+  替换的调用点共 11 处：控制台的「跟谱面」「文件夹」、侧栏标题「曲谱」、
+  状态栏那个 `🎮`、右键菜单两项、播放三兄弟（播放/暂停切换时图标一起切）、
+  「停止跟谱面」，制谱器的「手动演奏」「从这里播」「停止」「回到开头」
+  和两个「删除…」。
+
+★ 顺带想清楚的一件事 ★
+  「跟谱面」本来打算用纯文字（因为同一排的「打开…」「编辑谱面」
+  「重新载入」都没图标）。后来还是给了音符图标 —— 它跟「✚ 新建谱面」
+  在同一排，两个都有图标反而更整齐，而且音符的语义（"跟音乐有关"）
+  由按钮文字「跟谱面」补足，不会跟旁边的「▶ 播放」撞脸。
+
+### 16.76.2 一个手改配置就能把程序锁死 —— `_as_str` 把 dict 漏了出去
+
+审计给出的最严重一条。`ui/config.py::_as_str()` 原来长这样：
+
+```python
+def _as_str(v, key: str) -> str:
+    if v is None:
+        return str(DEFAULTS.get(key, ''))
+    if isinstance(v, (list, tuple, dict)):
+        # 热键那种结构化取值交给调用方解析，这里只保证不崩
+        return v          # ← 说好的 "-> str" 呢
+    return str(v)
+```
+
+那句注释是**错的**：热键根本走不到这里 —— 它们不在 `_STRINGS` 里，
+走的是 `normalise()` 最后那个 `else` 分支。于是唯一的使用者 `last_sheet`
+就成了受害者：
+
+    用户在 config.json 里把 `"last_sheet"` 写成 `{}`
+      → dict 原样漏进配置
+      → `control.py` 的 `os.path.isfile(last)` 抛 TypeError
+      → 而 `main.py` 构造 `ControlWindow()` 时**没有 try**
+      → **窗口根本不出现，双击了没反应，连个报错框都没有**
+
+改一个文本文件就能把程序锁死，这个代价太大。两处一起修：
+
+1. `_as_str` 只认 str，其它（含 None / 容器）一律退回默认值
+2. `control.py` 那边加一道 `isinstance(last, str)` —— 第二道防线。
+   这类错误一旦发生就是"看不到任何提示"，值得两道都留着。
+
+顺手修掉同一族的另一个：`_as_int` 的 `except` 只接了
+`TypeError, ValueError`，而 JSON 里写 `1e400` 读出来是 `inf`，
+`int(inf)` 抛的是 **OverflowError** —— 漏掉它，后果一模一样。
+
+★ 加了三条单元测试钉住 ★（`tests/test_config.py`）
+  - `test_structured_value_for_string_field_never_leaks_out`
+    （`{} [] ['a'] {'a':1} set() 0 1.5 True None` 逐个过）
+  - `test_huge_number_falls_back_instead_of_raising`（含 `nan`）
+  - `test_hotkey_structured_values_still_pass_through`
+    （确保这次硬化**没有误伤**热键那类结构化取值）
+
+### 16.76.3 拖一下滑块写 58 次盘
+
+审计实测：拖 30 步「大小」滑块 → `config.save()` 被调用 **58 次**。
+而 `config.save` 每次都要 `mkstemp` + `os.replace`（写临时文件再原子替换，
+这是 16.x 那轮特意做的防损坏设计）。58 次全部发生在用户手指底下。
+
+根因是一条链：滑块 → `_on_size_changed` → 连设 `sp_w`/`sp_h`
+→ 各自触发 `_apply_geometry()` → 末尾一次 `_save_config()`。
+
+改法是把落盘**合并**：`_save_config()` 默认只重启一个 400ms 的单发定时器，
+真正干活的是新的 `_flush_config()`。
+
+★ 必须同步改 `closeEvent`，否则丢数据 ★
+  窗口一关，那个 400ms 的定时器跟着被销毁 —— 刚拖完就关程序的话，
+  最后一次改动**永远写不进去**（下次启动跳回旧位置）。
+  所以 `closeEvent` 里改成 `_save_config(now=True)`，强制立刻落盘。
+
+实测（`_verify_save_merge.py`）：
+
+```
+拖 30 步滑块            → config.save 调用 0 次
+再跑 0.9 秒事件循环      → 又多 1 次
+_save_config(now=True)  → 立刻又多 1 次
+【通过】58 次 → 1 次
+```
+
+### 16.76.4 制谱器关掉之后，控制台一直以为它还开着
+
+`control.py` 是用 `dlg.finished.connect(_on_closed)` 接管"关掉之后干什么"的：
+把浮窗还回控制台自己那份谱面、刷新曲库、保存过就重新载入。
+
+可 `EditorDialog` 从头到尾**没有调过 `done()` / `accept()` / `reject()`** ——
+而 `QDialog.finished` 只在 `done()` 里发。**那条连接是一次都没响过的死线。**
+
+后果两条：
+- 关掉制谱器后 `self._editor` 还指着那个已经关掉的窗口，控制台以为它还开着
+- 在制谱器里改完保存，曲库不刷新、控制台也不载入新谱面
+
+改法：`EditorDialog.closeEvent()` 里显式补一发 `self.finished.emit(0)`
+（用 `event.isAccepted()` 挡一下，将来真有人 reject 掉关闭就不该报"已经关了"）。
+
+顺手修掉"连点两次「编辑谱面」开出两个窗口"：`_edit_sheet` 现在**先关旧的
+再开新的**，`_close_editor` 也从"`_editor` 是不是 None"改成**按身份比对**
+（`is not dlg` 就返回）—— 否则关掉第一个会把 `_editor` 清空，
+第二个明明还在屏幕上、控制台却已经不认它了。
+
+实测（`_verify_editor_close.py`）：
+
+```
+打开之前  _editor = None
+打开之后  _editor = EditorDialog
+关掉之后  _editor = None
+【通过】控制台正确放手（finished 补发生效）
+```
+
+### 16.76.5 闪光亮度被一个写死的 0.35 削掉了一截
+
+`set_flash(seconds=...)` 只存"到期时刻"，不存时长。而画的时候要算
+"这一下闪到几成了"，只能拿 `left / 某个常数` 去估 —— 那个常数写死 0.35。
+
+三个真实调用点给的却是 **0.25 / 0.28 / 0.15**。于是闪光**一上来就只有
+71% / 80% / 43% 的亮度**，越短的越暗 —— 跟"短促地啪一下"的意图正好相反。
+
+改法：`self.flash` 的 value 从 `float` 变成 `(到期时刻, 时长)`，
+用 `left / 这一下自己的时长` 归一化。四个读写点一起改
+（`set_flash` 写、`has_flash` 清、按到期时刻裁剪、`_flash_marks` 读）。
+
+实测（`_verify_flash_bright.py`）：
+
+```
+0.15 s    1.000   （改之前 0.429）
+0.25 s    1.000   （改之前 0.714）
+0.28 s    1.000   （改之前 0.800）
+0.45 s    1.000   （改之前 1.000）
+```
+
+★ 这是本轮唯一一处**会改变画面**的修复 ★
+  训练点按那一下（0.15s）会明显变清楚。它跟 16.75 那条
+  "改成只描边、别覆盖"是配套的：描边解决"盖住别的东西"，
+  这条解决"描边本身太淡"。
+
+### 16.76.6 浮窗每帧都在重算"整首曲子里弹不出来的音"
+
+`_paint_unmapped_hint()` 里那句 `bad = _unmapped(self.timeline)` 在
+**每一帧**都会跑一遍：`tl.all_pitches()` 遍历整首曲子的所有音并新建一个
+list，再对**每个音**做一次跨 16 格的线性查找。
+
+而它的结果**只取决于谱面内容**，跟"播到第几秒"毫无关系 ——
+浮窗上有收缩圈时是 8ms 重绘一次（125fps），等于白烧。
+
+改法：挪到 `set_timeline()` 里算一次缓存起来。
+`self.timeline` 全项目只有两处赋值（`__init__` 和 `set_timeline`），
+缓存不会漏失效。**画面完全不变。**
+
+### 16.76.7 死代码：删掉那些"看起来在支持、其实从没运行过"的东西
+
+审计逐条给了 grep 证据，确认**全项目零引用**之后才删：
+
+| 删掉的东西 | 证据 |
+|---|---|
+| `views._train_tick_t` + `_on_train_tick()` | 那个 16ms 定时器**从来没有被 `.start()` 过**（只有构造和 stop）。圈现在由 `_train_frame()` 按真实时间算 |
+| `views.train_t0` | 它是上面那个定时器的搭档，**只写不读** |
+| `views.train_text` | 存的是目标格底下那行 `3 / 60`，而用户早说过「不用显示还有多少个」。画它的 `_paint_train_hud()` 已删 → 只剩控制台还在往里写 |
+| `views._train_gap_at()` | 从没被调用过（唯一"命中"是 `control.py` 里一句 docstring 提到它） |
+| `views._fmt()` | 全项目唯一的同名函数在 `core/parser.py` 里，是另一个函数 |
+| `views._Frame.side` | "透视贴合"时代的字段，`\.side\b` 全项目 0 命中 |
+| `SheetView.set_time()` | 唯一子类 `GridView` 覆写了它，基类这份没人调得到 |
+| 训练分支里的 `_paint_hot_flash(p, tf)` | `_train_frame()` 固定 `hot_flash=False`，而那个函数一进门就 `return`，纯空转 |
+| 39 个未使用的 import | `ui/control.py` 一处就顶着 13 个没人用的 Qt 控件类，外加一个拖慢启动的 `numpy` |
+
+★ 顺手统一了一处命名 ★
+  `_rings_alive()` 里 `for _cells, rest, _name, start, lead in timed:` 的
+  `lead` 被 ruff 报 `B007 未使用的循环变量`。但那条**不是 bug** ——
+  旁边 5 行注释专门解释了为什么这里必须用统一的 `LEAD` 而不是各自的
+  `lead`（否则屏幕上还挂着圈、重绘却提前停了，圈会冻在半路）。
+  改成 `_lead` 消掉告警，同时把"我是故意不用的"写进名字里。
+
+### 16.76.8 验证
+
+- `python -m pytest tests -q` → **168 passed**（新增 3 条配置硬化测试）
+- `ruff check ui core main.py --select F,E9` → 干净
+- 截图 `_shots/D0_icons.png`（12 个图标的总览）、`D1_control.png`、
+  `D2_editor.png`：控制台和制谱器里**再没有一处彩色 emoji**
+
+★ 一条**没有采纳**的审计建议 ★
+  审计说 `player.tick` 挂了两路槽（`main.py:75` 和 `control.py:252`），
+  浮窗每帧被更新两次。查下来是**误判**：`main.py` 那路调的是
+  `overlay.set_time()`（更新**谱面网格**），`control.py` 那路在
+  `_on_tick` 里调的是 `overlay.set_progress()`（只更新**顶上那条进度**）。
+  两个不同的控件各更新各的，没有重复。**没改。**
+
 
 
 

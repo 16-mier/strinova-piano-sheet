@@ -89,7 +89,6 @@ def ensure_notes(out_dir: str, force: bool = False) -> dict[str, str]:
 
 
 if __name__ == '__main__':
-    import sys
     d = os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), 'assets', 'notes')
     files = ensure_notes(d, force=True)

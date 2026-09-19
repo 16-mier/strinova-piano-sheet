@@ -13,13 +13,11 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as _wintypes
-import math
 import time
 
-from PyQt6.QtCore import (QElapsedTimer, QObject, QPoint, QPointF, QRect,
-                          QRectF, QSize, Qt, QTimer, pyqtSignal)
-from PyQt6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QPolygonF
-from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QPushButton,
+from PyQt6.QtCore import (QElapsedTimer, QObject, QRectF, QSize, Qt, QTimer, pyqtSignal)
+from PyQt6.QtGui import QBrush, QColor, QIcon, QPainter, QPen
+from PyQt6.QtWidgets import (QHBoxLayout, QLabel, QPushButton,
                              QSlider, QVBoxLayout, QWidget)
 
 from core.timeline import Timeline

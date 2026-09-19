@@ -22,7 +22,7 @@ from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDockWidget, QFormLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QPushButton, QSlider, QSpinBox,
+    QLabel, QListWidget, QPushButton, QSlider, QSpinBox,
     QVBoxLayout, QWidget)
 from . import appstyle
 from .hotkeys import HotkeyEdit
@@ -72,7 +72,13 @@ class BuilderMixin:
         #   用户决定把它、连同「听音记谱」「导入音频」一起拿掉。
         #   留下的这条**压根不听声音**：谱面里每个音都有准确时间，
         #   照着它推浮窗，零延迟、不可能错。
-        btn_live = QPushButton('📜 跟谱面')
+        btn_live = QPushButton('跟谱面')
+        # ★ 图标自己画，不是 📜 ★
+        #   它是这一排里最后一个彩色 emoji：真机上被系统换成一个
+        #   **橙色的小卷轴**，跟旁边「✚ 新建谱面」和刚换掉的
+        #   「播放/停止/回到开头」都不是一套东西。
+        #   音符的语义也够用 —— "跟音乐有关"，具体意思由按钮文字承担。
+        btn_live.setIcon(QIcon(appstyle.note_icon(15)))
         btn_live.setToolTip(
             '浮窗按谱面里的时间自动往前走 —— 你跟着它弹。\n\n'
             '谱面里每个音都有准确的时间，所以这条路零延迟、不可能错，\n'
@@ -81,6 +87,7 @@ class BuilderMixin:
             '（和下面的「▶ 播放」是同一件事，只是入口放在这儿。）')
         for b in (btn_new, btn_open, btn_edit, btn_reload, btn_live):
             b.setFixedHeight(30)
+            b.setIconSize(QSize(15, 15))
         row.addWidget(QLabel('曲谱仓库'))
         row.addWidget(self.cmb_sheet, 1)
         row.addWidget(btn_new)
@@ -111,15 +118,25 @@ class BuilderMixin:
         fp = QVBoxLayout(g_play)
 
         prow = QHBoxLayout()
-        self.btn_play = QPushButton('▶  播放')
-        self.btn_stop = QPushButton('⏹  停止')
-        self.btn_back = QPushButton('⏮  回到开头')
+        # ★ 这三颗按钮的图标是自己画的，不是 ▶ / ⏹ / ⏮ 三个字符 ★
+        #   它们跟浮窗顶上那颗 ⏸ 是**同一批** Emoji_Presentation 字符：
+        #   真机上会被系统换成彩色 emoji（自己截一张图就看得很清楚 ——
+        #   「停止」和「回到开头」都变成了两个蓝色小方块），
+        #   跟旁边自己画的线性图标完全是两个体系。
+        #   浮窗控制条那边早就改成自己画了，控制台一直漏着。
+        self.btn_play = QPushButton('播放')
+        self.btn_play.setIcon(QIcon(appstyle.play_icon(13)))
+        self.btn_stop = QPushButton('停止')
+        self.btn_stop.setIcon(QIcon(appstyle.stop_icon(13)))
+        self.btn_back = QPushButton('回到开头')
+        self.btn_back.setIcon(QIcon(appstyle.back_icon(13)))
         # ★ 「后退 0.5 秒 / 前进 0.5 秒」删掉了 ★
         #   用户：「这俩个按钮不需要了」。
         #   微调位置现在靠下面那根进度条直接拖 —— 想退 3 秒就拖回去 3 秒，
         #   比连按六下按钮快，也不用先心算"按几下"。
         for b in (self.btn_play, self.btn_stop, self.btn_back):
             b.setFixedHeight(32)
+            b.setIconSize(QSize(13, 13))
         self.btn_play.setObjectName('primary')
         prow.addWidget(self.btn_play)
         prow.addWidget(self.btn_stop)
@@ -431,7 +448,7 @@ class BuilderMixin:
         可以浮出来，宽度还能拉 —— 这些都是白送的，不用自己写。
         载入过的会打勾，一眼看出现在放的是哪一首。
         """
-        self.dock_sheets = QDockWidget('📚 曲谱', self)
+        self.dock_sheets = QDockWidget('曲谱', self)
         self.dock_sheets.setObjectName('dock_sheets')
         self.dock_sheets.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea
@@ -458,7 +475,15 @@ class BuilderMixin:
         pv.addWidget(self.list_sheets, 1)
 
         brow = QHBoxLayout()
-        btn_dir = QPushButton('📂 文件夹')
+        btn_dir = QPushButton('文件夹')
+        # ★ 图标是自己画的，不是 📂 ★
+        #   跟旁边那颗红色的垃圾桶一样走 `appstyle` 的单色线性图标 ——
+        #   原来这里用的是 📂 这个字符，真机上被系统换成一个**明黄色的
+        #   文件夹**，跟旁边自己画的那套完全不是一种东西。
+        #   （浮窗控制条上早就为同一个理由把 📚/▶/⏸ 都画出来了，
+        #     控制台这边一直漏着。）
+        btn_dir.setIcon(QIcon(appstyle.folder_icon(16)))
+        btn_dir.setIconSize(QSize(16, 16))
         btn_dir.setToolTip('打开 sheets 文件夹（把新谱面丢进去）')
         btn_dir.clicked.connect(self._open_sheets_dir)
         btn_ref = QPushButton('刷新')
