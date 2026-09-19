@@ -1170,10 +1170,18 @@ class GridView(SheetView):
                     #     `×N` 说"还差几下"。）
                     run_here = repeat_run(f.group, 0, (row, col)) - 1
                     if run_here >= 1:
+                        # ★ 尺寸调过一次 ★
+                        #   用户：「改完之后双击和3击的提示变得有点不明显了」。
+                        #   圈现在收得快、在格子上待的时间短，那一格的视觉重心
+                        #   就落到这块 `×N` 上了 —— 原来 0.42 × 0.24
+                        #   （107 px 的格子算下来约 45 × 22）偏小，
+                        #   跟格子里那个大音名一比就弱了。
+                        #   现在 0.50 × 0.31（约 54 × 33），并且加了深色描边，
+                        #   见 `_paint_run`。
                         _paint_run(p, r.x() + r.width() * 0.05,
                                    r.y() + r.height() * 0.05,
-                                   min(r.width() * 0.42, 52.0),
-                                   min(r.height() * 0.24, 22.0), run_here)
+                                   min(r.width() * 0.50, 62.0),
+                                   min(r.height() * 0.31, 34.0), run_here)
                     continue
 
                 badge = min(f.cell * 0.36, 28.0)
@@ -1360,13 +1368,21 @@ def _paint_run(p: QPainter, x: float, y: float, w: float, h: float, n: int):
       上一版做成了红底大徽章。红色是"警告"的语气，会跟当前格那块
       亮黄抢注意力 —— 而这里只是"提示你等下还要按一下"。
       所以用跟当前格同色系的黄底，克制一点。
+
+    ★ 但黄底配黄底会糊 —— 所以必须描一道深色边 ★
+      用户：「改完之后双击和3击的提示变得有点不明显了」。
+      这块徽章**绝大多数时候画在淡黄底的格子上**（连按的当前格就是
+      `T.UPCOMING[0]` 淡黄 #ffee9e），黄底叠黄徽章，边界直接糊在一起，
+      远看就是一块黄斑 —— 那才是"不明显"的主因，不是尺寸不够。
+      一条深色描边就能把它从底色里切出来，比单纯放大管用得多。
+      （放大也一起做了，见 `_paint_badges` 里的调用点。）
     """
     box = QRectF(x, y, w, h)
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QBrush(QColor(255, 206, 48, 246)))
+    p.setPen(QPen(QColor(52, 38, 0), max(1.6, h * 0.10)))
+    p.setBrush(QBrush(QColor(255, 206, 48, 252)))
     p.drawRoundedRect(box, h * 0.36, h * 0.36)
-    p.setPen(QPen(QColor(28, 22, 0)))
-    p.setFont(_fit_font(h * 0.68, bold=True))
+    p.setPen(QPen(QColor(24, 18, 0)))
+    p.setFont(_fit_font(h * 0.72, bold=True))
     p.drawText(box, Qt.AlignmentFlag.AlignCenter, '×%d' % n)
 
 
