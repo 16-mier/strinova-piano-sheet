@@ -990,8 +990,11 @@ class ControlWindow(BuilderMixin, QMainWindow):
         self.train.set_song_name(self.overlay.lbl_song.text())
         self.train.show()
         self._train_refresh()
-        # 圈要动就得有人按帧重绘 —— 那个 16ms 定时器只在这个模式里跑。
-        g._train_tick_t.start()
+        # ★ 不再起那个 16ms 的定时器 ★
+        #   它原来是为了让收缩圈动起来。用户要的是"不用倒计时、
+        #   只需要显示就行" —— 圈没了，就不需要按帧重绘了。
+        #   训练面板现在只在**点对/点错**的时候重绘一次，
+        #   平时一个像素都不动，也就不会白烧 CPU。
 
     def _train_tick_stop(self):
         try:

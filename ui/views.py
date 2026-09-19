@@ -943,24 +943,23 @@ class GridView(SheetView):
             c = layout.pitch_to_cell(pitch)
             group.append(([c] if c is not None else [], False, pitch))
 
-        # ★ 时间那两层：拿真实流逝时间当"曲子时钟" ★
-        #   当前这个音从 `train_t0` 起算，后面的按各自间隔顺延 ——
-        #   于是圈会**依次**缩到中心，把"这几个音之间各隔多久"直接画出来。
-        now = time.monotonic()
-        elapsed = max(0.0, now - self.train_t0)
-        timed = []
-        t = 0.0                       # 相对"当前音"起点的虚拟时间轴
-        for idx, (cells, rest, name) in enumerate(group):
-            gap = self._train_gap_at(i + idx)
-            start = t - elapsed       # `left` = 这个音离现在还有多久
-            timed.append((cells, rest, name, start, max(0.15, gap)))
-            t += gap
+        # ★ 不画收缩圈 ★
+        #   用户：「要显示下一个按键的倒计时但是不用倒计时只需要显示就行」。
+        #   也就是：**只要标出"下一个在哪"，不要那个会动的倒计时**。
+        #   所以 `timed` 给空 —— `_paint_rings` 靠它画圈，空了就一个都不画。
+        #   "下一个在哪"由**序号角标**说（`orders` 会在 `_paint_badges` 里
+        #   画成 `1 2 3…`），那是静态的，不会在屏幕上动来动去。
+        #
+        #   （上一版这里塞了真实流逝时间、让圈缩着走，想用圈来标"隔多久"。
+        #     用户的答复是不要 —— 训练本来就不看时间，圈在那儿缩反而像
+        #     在催他。这就跟"播放改成手动点"是一回事：**别催**。）
+        timed: list = []
 
         return _Frame(
             w=w, h=h, cell=cell, side=side, ox=ox, oy=oy,
             group=group, timed=timed,
             orders=cell_orders(group),
-            blinking=True,            # 提示层开着：预告格、序号角标都要有
+            blinking=True,            # 提示层开着：序号角标要显示
             hot_flash=False,          # 没有"换音闪一下"（不按时间走）
             cur_cells=group[0][0],
         )
@@ -1105,6 +1104,18 @@ class GridView(SheetView):
             return (T.ACTIVE, T.ACTIVE_EDGE, _txt_for(T.ACTIVE),
                     -f.cell * 0.05)              # 当前格微微放大
         idx = min(rank - 1, len(T.UPCOMING) - 1)
+        if self.train_on:
+            # ★ 训练时**预告格也用深色** ★
+            #   用户：「不要用浅色代替要点的，要深色」。
+            #
+            #   淡黄那套是给**演奏时**用的：屏幕上同时挂着好几个音，
+            #   靠颜色的深浅区分"先后"（`T.UPCOMING` 从亮到淡）。
+            #   训练是**一个一个来**的 —— 当前格自己就说清了"现在点这个"，
+            #   后面那片浅黄除了抢注意力没有别的作用。
+            #
+            #   "接下来在哪"仍然看得见 —— 序号角标 `1 2 3…`
+            #   是另一层（`_paint_badges` 画的），不靠底色。
+            return T.CELL, T.CELL_EDGE, T.TEXT_DIM, 0.0
         # ★ 预告格也一样按底色分流 ★
         #   前几档是浅黄（要深字），最后几档已经淡到接近灰蓝（要浅字）——
         #   一条写死的颜色不可能两头都对。

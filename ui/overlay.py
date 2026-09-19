@@ -902,7 +902,9 @@ class OverlayWindow(QWidget):
         self._count_timer.setInterval(1000)
         self._count_timer.timeout.connect(self._on_count_tick)
 
-        self._drag_offset = None
+        # （这里原来有个 `_drag_offset` —— 浮窗自己拖自己用的。
+        #   §16.71 把那套删了：它跟「可按」抢鼠标，挪窗口现在只走把手。）
+        self._ghost = False          # 临时隐身（卡丘不在前台时）
         self._ghost = False          # 临时隐身（卡丘不在前台时）
         self._user_opacity = 1.0     # 用户在控制面板里设的不透明度
         # 实时跟弹高亮的刷新（有高亮才跑，平时零开销）
@@ -1245,28 +1247,24 @@ class OverlayWindow(QWidget):
             pass
         super().closeEvent(event)
 
-    # ---- 拖动（只在关掉鼠标穿透时可用）----
-
-    def mousePressEvent(self, event):
-        if (not self._click_through
-                and event.button() == Qt.MouseButton.LeftButton):
-            self._drag_offset = (event.globalPosition().toPoint()
-                                 - self.frameGeometry().topLeft())
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if (not self._click_through and self._drag_offset is not None
-                and event.buttons() & Qt.MouseButton.LeftButton):
-            self.move(event.globalPosition().toPoint() - self._drag_offset)
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        self._drag_offset = None
-        super().mouseReleaseEvent(event)
+    # ---- 拖动：**只走把手** ----
+    #
+    # ★ 这里原来有一段"关掉穿透时按哪儿都能拖" ★
+    #   用户：「然后点可按的时候点其他地方长按会拖动示谱器也解决一下」。
+    #
+    #   那段的判据是 `not self._click_through` —— 而「可按」干的正是
+    #   "关掉穿透"。于是两件事撞在一起：开着「可按」想在格子边上
+    #   或者格子缝里点一下，结果**把整个谱面窗拖走了**，
+    #   鼠标一松窗口已经偏出去一截，还得再挪回来。
+    #
+    #   删掉之后挪窗口只剩一条路：**把手**（`DragHandle`）。
+    #   它本来就是为这个存在的 —— 常驻、不穿透、有自己的拖动手势，
+    #   而且跟"点格子"在屏幕上完全不重叠（它在顶上那一条，
+    #   格子区域在它下面）。**能拖的地方和能点的地方分开**，
+    #   就不会再互相误伤。
+    #
+    #   （`OverlayWindow.mousePressEvent` / `mouseMoveEvent` /
+    #     `mouseReleaseEvent` 那三个一起删了 —— 它们只干这件事。）
 
     # ---- 倒计时 ----
 
