@@ -1594,7 +1594,7 @@ class GridView(SheetView):
         #   三个**圈**套在一起没问题（同心，本来就该这样），
         #   但三个**数字**都挤在右上角就是一团黑，一个都读不出来。
         #   所以先按格子分组，组内按"离得最近的排最上面"从上往下排。
-        by_cell: dict[tuple[int, int], list[float]] = {}
+        by_cell: dict[tuple[int, int], list[tuple[float, float]]] = {}
         for _cells, rest, _name, start, lead in f.timed:
             if rest:
                 continue
@@ -1602,25 +1602,31 @@ class GridView(SheetView):
             if left < 0.0 or left > LEAD:
                 continue
             for cell in _cells:
-                by_cell.setdefault(cell, []).append(left)
+                # 连 `lead` 一起存 —— 数字的颜色要按"还剩几成"算
+                by_cell.setdefault(cell, []).append((left, lead))
 
         for (row, col), lefts in by_cell.items():
-            lefts.sort()
+            lefts.sort()                      # 最近的排最上面
             r = self._cell_rect(f, row, col)
             bw = max(26.0, f.cell * 0.34)
             bh = max(16.0, f.cell * 0.20)
             gap = max(2.0, f.cell * 0.022)
-            for i, left in enumerate(lefts):
+            for i, (left, lead) in enumerate(lefts):
                 box = QRectF(r.right() - bw - f.cell * 0.04,
                              r.top() + f.cell * 0.04 + i * (bh + gap),
                              bw, bh)
-                # 深色圆角底 —— 数字得同时压在淡黄预告底、深橄榄当前底、
-                # 青色闪光上都看得清，光靠字色做不到。
+                # 深色圆角底 —— 数字得同时压在预告格的深蓝灰、
+                # 当前格的深橄榄、以及青色闪光上都看得清，
+                # 光靠字色做不到（`_hot_color` 那三档横跨冷到热）。
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QBrush(QColor(18, 14, 2, 205)))
                 p.drawRoundedRect(box, bh * 0.34, bh * 0.34)
-                p.setPen(QPen(QColor(T.PRESS.red(), T.PRESS.green(),
-                                     T.PRESS.blue())))
+                # ★ 数字颜色跟着"还剩几成"走 ★
+                #   用户：「给这个倒计时加变色」。
+                #   分母用这个音**自己的** `lead`（= 它跟上一个音的间隔），
+                #   所以快曲子整体偏暖、慢曲子整体偏冷 ——
+                #   读出来的"紧不紧"永远相对**这首曲子**，不是绝对秒数。
+                p.setPen(QPen(_hot_color(left / max(0.05, lead))))
                 p.setFont(_fit_font(bh * 0.66, bold=True))
                 p.drawText(box, Qt.AlignmentFlag.AlignCenter, '%.1f' % left)
 
@@ -1775,6 +1781,42 @@ def _txt_for(fill: QColor) -> QColor:
                                         跟深橄榄那边统一
     """
     return T.DARK_TEXT if fill.lightness() >= 140 else T.ACTIVE_TEXT
+
+
+def _hot_color(k: float) -> QColor:
+    """倒计时数字的颜色 —— 越接近该按越"烫"。
+
+    用户：「给这个倒计时加变色」。
+
+    `k` 是**剩余比例**：1 = 刚出现，0 = 就是现在。
+
+        1.0 → 青绿 (70, 235, 190)    "还早，不用急"
+        0.5 → 亮黄 (255, 214, 74)    "注意了"
+        0.0 → 橙红 (255, 92, 56)     "就是现在"
+
+    ★ 为什么挑这三个色 ★
+      青绿和橙红在色轮两头、中间过黄 —— 一条直觉上的"冷 → 热"，
+      瞟一眼就知道哪个最急，不用去读数字。
+      而且青绿（`T.HIT`）和亮黄（`T.PRESS`）这个项目里本来就在用，
+      橙红是新的，专给"最急"这一档。
+
+    ★ 为什么不用纯红 ★
+      纯红压在深底上太"报警"了 —— 练琴的时候满屏红字很累。
+      橙红留了点亮黄的底子，是"烫"，不是"出错"。
+    """
+    stops = ((1.0, QColor(70, 235, 190)),
+             (0.5, QColor(255, 214, 74)),
+             (0.0, QColor(255, 92, 56)))
+    k = max(0.0, min(1.0, float(k)))
+    for i in range(len(stops) - 1):
+        hi, c_hi = stops[i]
+        lo, c_lo = stops[i + 1]
+        if lo <= k <= hi:
+            t = 0.0 if hi == lo else (hi - k) / (hi - lo)
+            return QColor(int(c_hi.red() + (c_lo.red() - c_hi.red()) * t),
+                          int(c_hi.green() + (c_lo.green() - c_hi.green()) * t),
+                          int(c_hi.blue() + (c_lo.blue() - c_hi.blue()) * t))
+    return QColor(stops[-1][1])
 
 
 def _paint_run(p: QPainter, x: float, y: float, w: float, h: float, n: int):
