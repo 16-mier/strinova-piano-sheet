@@ -823,12 +823,7 @@ class GridView(SheetView):
             return None
 
         w, h = self.width(), self.height()
-        avail_w = w - 2 * self.PAD
-        avail_h = h - self.HEADER_H - self.FOOTER_H
-        side = min(avail_w, avail_h)
-        cell = (side - 3 * T.GAP) / 4.0
-        ox = (w - side) / 2.0
-        oy = self.HEADER_H + (avail_h - side) / 2.0
+        ox, oy, cell, _side = self._geom_full()
 
         cur_cells, _cur_rest, _cur_name = group[0]
         # 「换音那一下」的闪光 —— 纯谱面驱动，见 `current_blinking()`
@@ -867,15 +862,18 @@ class GridView(SheetView):
 
     # -- ★ 「可按」：点格子出声 ★ --
 
-    def _geom(self) -> tuple[float, float, float]:
-        """网格几何 `(ox, oy, cell)` —— **只看窗口大小，不看有没有谱面**。
+    def _geom_full(self) -> tuple[float, float, float, float]:
+        """网格几何 `(ox, oy, cell, side)` —— **唯一一份算式**。
 
-        ★ 为什么单开一份 ★
-          `_frame()` 在"还没载入谱面"和"曲子播完了"这两种情况下返回
-          `None`（画画那条路那样处理是对的：没内容就不画）。
-          可**点格子**不该跟着失效 —— 格子还在屏幕上，点下去就该响。
-          所以这里把 `_frame()` 里那段几何算式抄一份，去掉 timeline 那层。
-          （哪天那边的排版改了，这两处得一起改。）
+        ★ 原来这段抄了三遍 ★
+          `_frame()` / `_train_frame()` 里各有一份**逐字符相同**的拷贝，
+          而且 `_geom()` 的文档里自己写着「哪天那边的排版改了，
+          这两处得一起改」—— 靠人记着的事迟早会忘，
+          忘了就是网格和训练面板错位。现在只有这里一份。
+
+        `side` 是网格外框的边长（4 格 + 3 个 `T.GAP`）。它单独返回是因为
+        算 `cell` 要用它，而 `_Frame` 已经不再存这个字段（那是"透视贴合"
+        时代的遗留）。
         """
         w, h = self.width(), self.height()
         avail_w = w - 2 * self.PAD
@@ -884,6 +882,19 @@ class GridView(SheetView):
         cell = (side - 3 * T.GAP) / 4.0
         ox = (w - side) / 2.0
         oy = self.HEADER_H + (avail_h - side) / 2.0
+        return ox, oy, cell, side
+
+    def _geom(self) -> tuple[float, float, float]:
+        """网格几何 `(ox, oy, cell)` —— **只看窗口大小，不看有没有谱面**。
+
+        ★ 为什么还要留一个"没有 side"的版本 ★
+          `_frame()` 在"还没载入谱面"和"曲子播完了"这两种情况下返回
+          `None`（画画那条路那样处理是对的：没内容就不画）。
+          可**点格子**不该跟着失效 —— 格子还在屏幕上，点下去就该响。
+          所以 `_cell_at()` / `_flash_marks()` 这些地方需要一个
+          "不需要有谱面也能算出格子在哪"的入口，而它们只要前三项。
+        """
+        ox, oy, cell, _side = self._geom_full()
         return ox, oy, cell
 
     def _cell_at(self, pos) -> tuple[int, int] | None:
@@ -956,12 +967,7 @@ class GridView(SheetView):
             return None
 
         w, h = self.width(), self.height()
-        avail_w = w - 2 * self.PAD
-        avail_h = h - self.HEADER_H - self.FOOTER_H
-        side = min(avail_w, avail_h)
-        cell = (side - 3 * T.GAP) / 4.0
-        ox = (w - side) / 2.0
-        oy = self.HEADER_H + (avail_h - side) / 2.0
+        ox, oy, cell, _side = self._geom_full()
 
         # 往后看几个 —— 跟谱面窗同一个 `preview_count`
         n = max(1, self.preview_count)
