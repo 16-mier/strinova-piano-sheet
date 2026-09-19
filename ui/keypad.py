@@ -245,16 +245,29 @@ class KeyPad(QWidget):
                 pitch = layout.cell_to_pitch(row, col)
                 flash = self._flash.get((row, col), 0)
                 # （原来这里还有两种底色：拖动中的蓝色、Shift 挑中的
-                #   绿色 —— 那套多选删了，现在只剩"按下去黄色一闪"。）
-                if flash > 0:
-                    k = flash / 8.0
-                    fill = QColor(255, 206, 48, int(120 + 135 * k))
-                    txt = T.ACTIVE_TEXT
-                else:
-                    fill = T.CELL
-                    txt = T.TEXT
+                #   绿色 —— 那套多选删了。）
+                #
+                # ★ 按下去**不再把整块染成亮黄** ★
+                #   用户：「已经被点过的不需要浅色了」
+                #        「（制谱器）深色之后那个按键会变成浅色」。
+                #
+                #   原来是这样：一按，格子底从深蓝灰 (`T.CELL`) 翻成
+                #   亮黄 `(255,206,48,120~255)`、字也跟着从浅翻成深。
+                #   问题是**整块都变浅了** —— 打击垫上 16 个格子，
+                #   敲起来的时候连着一片亮黄，反而看不清刚敲的是哪个；
+                #   而且那一下太"重"，像是把键换掉了，而不是"我按了它"。
+                #
+                #   现在只动**边**，底色永远保持深色：
+                #   一圈亮黄从 1.6px 涨到 6px、从半透明涨到实心，
+                #   8 帧收掉。跟浮窗那边（`GridView._pressure`）一个思路 ——
+                #   **深底不动，让轮廓去表达事件**。
+                lw = 1.6 + 4.4 * (flash / 8.0) if flash > 0 else 1.6
+                edge = (QColor(255, 206, 48, int(160 + 95 * (flash / 8.0)))
+                        if flash > 0 else T.CELL_EDGE)
+                fill = T.CELL
+                txt = T.TEXT
 
-                p.setPen(QPen(T.CELL_EDGE, 1.6))
+                p.setPen(QPen(edge, lw))
                 p.setBrush(QBrush(fill))
                 p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
 
