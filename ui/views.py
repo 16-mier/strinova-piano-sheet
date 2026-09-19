@@ -189,6 +189,23 @@ class SheetView(QWidget):
         #   `WS_EX_TRANSPARENT`（鼠标完全穿透），事件压根到不了这里；
         #   打开它会顺手把穿透取消（见 `control._set_pad_click`）。
         self.pad_click = False
+
+        # ★ 「训练」模式 ★
+        #   用户：「跟打功能旁边再增加一个训练功能，具体就是去点按键，
+        #   但是不是按照曲子顺序来是按照音符顺序来，自己点，
+        #   点一个继续下一个」。
+        #
+        #   跟「跟打」的区别就一句话：
+        #     跟打看**时间**（播放进度在跑，你得跟上）
+        #     训练看**顺序**（谱面第 1、2、3… 个音，点对当前这个才亮下一个）
+        #   也就是把"什么时候点"交给谱面顺序、"来不来得及"交给自己。
+        #
+        #   渲染上只做一件事：**只把目标那一格点亮，其余一律压暗**。
+        #   训练时屏幕上不该有任何"后面还有几个音"的提示 ——
+        #   那是谱面提示，而训练要练的正是"不用提示也找得到键"。
+        self.train_on = False
+        self.train_cell: tuple[int, int] | None = None
+        self.train_text = ''          # 左上角那行进度，如 "3 / 60"
         self._cur_stamp = 0.0            # 上一次「当前音换人」的时刻
         self.flash: dict[str, float] = {}   # 实时跟弹：音高 -> 到期时刻
         self._flash_last: dict[str, float] = {}   # 每个键上次闪的时刻（防闪花眼）
@@ -668,6 +685,16 @@ class GridView(SheetView):
         #   （标志由 `control._refresh_keys_only()` 拍板：可按开着**而且**
         #     跟打关着才置真 —— 跟打必须看提示。）
         #   放在最前面：有谱面 / 没谱面 / 演奏结束，三种情况一视同仁。
+        # ★ 「训练」模式：整屏自己画 ★
+        #   放在**最前面**，`keys_only` 之前 —— 训练和「可按」经常一起开，
+        #   而 `keys_only` 那条会先 return 掉。
+        #   它不看谱面时间，所以也不走 `_frame()`（见 `_paint_train`）。
+        if self.train_on:
+            self._panel(p)
+            self._paint_train(p)
+            self._paint_flash(p)      # 点下去的青光留着当反馈
+            return
+
         if self.keys_only:
             self._panel(p)
             self._paint_blank_cells(p)
@@ -831,6 +858,54 @@ class GridView(SheetView):
                 p.drawText(r, Qt.AlignmentFlag.AlignCenter,
                            layout.PAD_GRID[row][col])
 
+    def _paint_train(self, p: QPainter):
+        """「训练」模式的整屏：只画 16 个格子，把目标那一格点亮。
+
+        用户：「跟打功能旁边再增加一个训练功能……不是按照曲子顺序来
+        是按照音符顺序来，自己点，点一个继续下一个」。
+
+        ★ 为什么自己画、不复用 `_paint_cells` ★
+          `_paint_cells` 吃的是 `_Frame`，而 `_Frame` 是从**谱面时间**
+          算出来的 —— 训练恰恰不看时间（没在播放），曲子末尾还会整个
+          返回 `None`。这里要的是"无论时钟停在哪，16 个格子都在、
+          目标格始终亮着"，所以几何量直接取 `_geom()`（只看窗口大小），
+          跟 `_cell_at()` / `_paint_blank_cells()` 同源。
+
+        ★ 只点亮目标那一格，其余压到最暗 ★
+          训练练的就是"不靠提示也找得到键"。屏幕上再留着淡黄预告、
+          序号角标、收缩圆圈，等于开卷考试。
+        """
+        ox, oy, cell = self._geom()
+        for row in range(4):
+            for col in range(4):
+                target = (self.train_cell == (row, col))
+                r = QRectF(ox + col * (cell + T.GAP),
+                           oy + (3 - row) * (cell + T.GAP), cell, cell)
+                if target:
+                    r = r.adjusted(-cell * 0.08, -cell * 0.08,
+                                   cell * 0.08, cell * 0.08)
+                    p.setPen(QPen(QColor(255, 248, 214), 5.0))
+                    p.setBrush(QBrush(T.PRESS))
+                else:
+                    p.setPen(QPen(T.CELL_EDGE, 1.6))
+                    p.setBrush(QBrush(T.CELL))
+                p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
+
+                if not self.show_labels:
+                    continue
+                p.setPen(QPen(QColor(38, 28, 0) if target else T.TEXT_DIM))
+                p.setFont(_fit_font(cell * 0.32, bold=target))
+                p.drawText(r, Qt.AlignmentFlag.AlignCenter,
+                           layout.cell_to_pitch(row, col))
+                if target and self.train_text:
+                    # 进度写在目标格子里（音名下面那行）——
+                    # 放别处会跟格子抢地方，而这儿本来就有一行 PAD 号的位置。
+                    p.setPen(QPen(QColor(70, 52, 0)))
+                    p.setFont(_fit_font(cell * 0.17))
+                    p.drawText(QRectF(r.x(), r.y() + r.height() * 0.64,
+                                      r.width(), r.height() * 0.30),
+                               Qt.AlignmentFlag.AlignCenter, self.train_text)
+
     def mousePressEvent(self, event):
         """「可按」打开时，点哪个格子就出哪个音。
 
@@ -878,6 +953,19 @@ class GridView(SheetView):
         `cell` 是格子的 `(row, col)`，只有判断"当前格是不是连按的开头"
         时才需要 —— 见下面那段。
         """
+        # ★ 训练模式优先于一切 ★
+        #   「训练」开着的时候**不看谱面时间**（`f.blinking` 可能是假的，
+        #   因为压根没在播放），只看"下一个该点的音在哪一格"。
+        #   目标格给亮黄底 + 近白的粗边 + 深字（对比拉到最大），
+        #   其余全部压成最暗的 `T.CELL` / `T.TEXT_DIM` ——
+        #   训练时要练的就是"不用提示也找得到键"，
+        #   屏幕上不该再留着"后面还有几个音"的预告。
+        if self.train_on:
+            if cell is not None and cell == self.train_cell:
+                return (T.PRESS, QColor(255, 248, 214), QColor(38, 28, 0),
+                        -f.cell * 0.08)
+            return T.CELL, T.CELL_EDGE, T.TEXT_DIM, 0.0
+
         if rank is None or not f.blinking:
             # ★ 实时跟弹时，后面几个音的「淡黄预告格」也要一起关掉 ★
             #   只关当前格是不够的：预告格本身是淡黄 (255,238,158)，

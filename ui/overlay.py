@@ -340,6 +340,7 @@ class DragHandle(QWidget):
     # ★ 「跟打」和「可按」★ —— 用户：「新增一个跟打和激活为可点按发声的按钮」
     karaoke_toggled = pyqtSignal(bool)       # 跟打：不放原声，改成你点出声
     pad_click_toggled = pyqtSignal(bool)     # 可按：让浮窗的格子能被点
+    train_toggled = pyqtSignal(bool)         # 训练：按音符顺序一个一个点
 
     def __init__(self, owner: QWidget):
         super().__init__(None)
@@ -484,6 +485,27 @@ class DragHandle(QWidget):
         lay.addWidget(self.btn_tap)
         self.set_pad_click(False)
 
+        # ★ 「训练」★ —— 放在「跟打」旁边
+        #   用户：「跟打功能旁边再增加一个训练功能，具体就是去点按键，
+        #   但是不是按照曲子顺序来是按照音符顺序来，自己点，
+        #   点一个继续下一个」。
+        #
+        #   跟「跟打」的区别一句话：跟打看**时间**（播放进度在跑），
+        #   训练看**顺序**（第 1、2、3… 个音，点对当前这个才亮下一个）。
+        #
+        #   打开它会在谱面窗**旁边**多开一块 `TrainWindow` ——
+        #   用户：「点这个旁边会直接显示另外一个铺面，
+        #   之前那个铺面可以用来预览」。所以谱面窗照旧，不动它。
+        self.btn_train = QPushButton('训练')
+        self.btn_train.setObjectName('bar')
+        self.btn_train.setFixedSize(40, HANDLE_H - 12)
+        self.btn_train.setCheckable(True)
+        self.btn_train.setChecked(False)
+        self.btn_train.setToolTip('训练：关着（点一下打开）')
+        self.btn_train.toggled.connect(self._on_train_toggled)
+        lay.addWidget(self.btn_train)
+        self.set_train(False)
+
         # ★ 控制条上的按钮一律不拿键盘焦点 ★
         #   用户连着报了两轮「可按的时候高亮没有消失」——
         #   那个"高亮"就是 `QPushButton:focus` 的青绿边框：
@@ -556,6 +578,28 @@ class DragHandle(QWidget):
             self.btn_tap.setToolTip(
                 '可按：关着（点一下打开）\n'
                 '打开之后浮窗的格子可以点，点一下就出那个音')
+
+    def _on_train_toggled(self, on: bool):
+        self.set_train(on)
+        self.train_toggled.emit(bool(on))
+
+    def set_train(self, on: bool):
+        """「训练」按钮的**显示** —— 训练面板由控制台开（它管着谱面）。"""
+        on = bool(on)
+        self.btn_train.blockSignals(True)
+        self.btn_train.setChecked(on)
+        self.btn_train.blockSignals(False)
+        if on:
+            self.btn_train.setToolTip(
+                '训练：开着 —— 谱面窗旁边那块面板按音符顺序一个个点\n'
+                '（点对当前那个才亮下一个；点错了不动）\n'
+                '点一下关掉')
+        else:
+            self.btn_train.setToolTip(
+                '训练：关着（点一下打开）\n'
+                '打开之后会在谱面窗旁边多开一块面板，\n'
+                '按谱面里音符的**先后顺序**一个一个点 —— 不看时间，\n'
+                '点对当前这个才亮下一个。谱面窗照旧当预览。')
 
     def _on_seek_start(self):
         self._seeking = True
@@ -651,6 +695,89 @@ class DragHandle(QWidget):
         return _ex_style(self)
 
 
+
+
+class TrainWindow(QWidget):
+    """「训练」用的那块面板 —— **独立的一块窗**，跟谱面窗并排摆着。
+
+    用户：「跟打功能旁边再增加一个训练功能……自己点，点一个继续下一个」
+         「点这个旁边会直接显示另外一个铺面，之前那个铺面可以用来预览」
+
+    ★ 为什么单开一块，而不是把谱面窗切过去 ★
+      用户要的就是**两个同时看**：一边练（只亮当前这一个音），
+      一边看谱面预览（该弹哪儿、后面还有几个音还看得见）。
+      做成一窗口切换的话，练的时候就没得对照了。
+
+    ★ 它跟谱面窗的区别只有两点 ★
+      · 鼠标**永远不穿透** —— 训练本来就是拿来点的，
+        不用先开「可按」那一步（那个开关存在的理由是"平时挡准星"，
+        训练窗是临时开的，没这个问题）；
+      · 画的是训练界面（见 `GridView._paint_train`），不是谱面提示。
+
+    ★ 复用 `GridView`，不另写一套 ★
+      16 个格子的几何、`_geom()`、`_cell_at()`、`pad_pressed` 信号
+      全都是现成的 —— 训练和谱面共用的恰恰是"键位"这一层，
+      不同的只是"画什么"。所以这里只把 `train_on` 打开。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(None)
+        self.setWindowTitle('卡丘琴谱器 · 训练')
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool                     # 不占任务栏
+            | Qt.WindowType.WindowDoesNotAcceptFocus  # 不抢焦点（别让游戏掉帧）
+        )
+        # ★ 注意这里**没有** `WA_TransparentForMouseEvents` ★
+        #   谱面窗那边有个大坑：顶层窗口一旦设过那个属性，Qt 在窗口创建
+        #   那一刻就把它固化成"输入穿透"，之后再清也回不来
+        #   （见 `OverlayWindow.__init__` 那段）。训练窗压根不需要它 ——
+        #   永远要能点，索性一行都不写。
+        self.grid = GridView(self)
+        self.grid.train_on = True
+        self.grid.pad_click = True               # 点格子就发 `pad_pressed`
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self.grid)
+        self.resize(360, 360)
+
+    # 转发一下，控制台只用跟这个窗口打交道
+    @property
+    def pad_pressed(self):
+        return self.grid.pad_pressed
+
+    def set_target(self, cell, text: str = ''):
+        """换目标格 + 那行进度。"""
+        self.grid.train_cell = cell
+        self.grid.train_text = text
+        self.grid.update()
+
+    def set_song_name(self, text: str):
+        self.setWindowTitle('卡丘琴谱器 · 训练　%s' % (text or ''))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._apply_exstyle()
+
+    def _apply_exstyle(self):
+        """补一个 `WS_EX_NOACTIVATE` —— 跟谱面窗一样的理由：
+        训练的时候游戏不能掉焦点，掉了 UE4 就解除鼠标锁定。"""
+        try:
+            hwnd = int(self.winId())
+            ex = _user32.GetWindowLongW(ctypes.c_void_p(hwnd),
+                                        GWL_EXSTYLE) & 0xFFFFFFFF
+            ex |= (WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+            ex &= ~(WS_EX_TRANSPARENT & 0xFFFFFFFF)   # 确保不穿透
+            _user32.SetWindowLongW(ctypes.c_void_p(hwnd), GWL_EXSTYLE, ex)
+            _user32.SetWindowPos(ctypes.c_void_p(hwnd), None, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+                                 | SWP_NOACTIVATE | SWP_FRAMECHANGED)
+        except Exception:
+            pass
 
 
 class OverlayWindow(QWidget):

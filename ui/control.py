@@ -27,7 +27,7 @@ from .editor import EditorDialog
 from .hotkeys import (HK_PLAYPAUSE, HK_RESTART, HK_TOGGLE, HotkeyEdit,
                       HotkeyManager, parse_binding)
 from .keypad import NotePlayer
-from .overlay import OverlayWindow, Player
+from .overlay import OverlayWindow, Player, TrainWindow
 
 
 def _fmt_time(sec: float) -> str:
@@ -127,6 +127,20 @@ class ControlWindow(BuilderMixin, QMainWindow):
         #   `synth.ensure_notes()` 在第一次运行时还要现生成 16 个 wav，
         #   没开这个功能的人一点开销都不该摊上。
         self._notes = None
+
+        # ★ 「训练」★
+        #   用户：「跟打功能旁边再增加一个训练功能，具体就是去点按键，
+        #   但是不是按照曲子顺序来是按照音符顺序来，自己点，
+        #   点一个继续下一个」+「点这个旁边会直接显示另外一个铺面，
+        #   之前那个铺面可以用来预览」。
+        #
+        #   所以它是**独立的一块窗**（`TrainWindow`），跟谱面窗并排摆：
+        #   一边练、一边看。谱面窗一点不动，它继续当预览。
+        #   跟「跟打」的区别：跟打看**时间**，训练看**顺序**。
+        self.train = TrainWindow()
+        self.train.grid.pad_pressed.connect(self._on_train_pad)
+        self._train_seq: list[str] = []      # 摊平之后的音名序列
+        self._train_i = 0                    # 练到第几个了
 
         # ★ 主题要在 `_build()` **之前**装 ★
         #   `setStyle('Fusion')` 对已经建好的控件不生效，
@@ -233,6 +247,8 @@ class ControlWindow(BuilderMixin, QMainWindow):
         self.overlay.handle.karaoke_toggled.connect(self._set_karaoke)
         self.overlay.handle.pad_click_toggled.connect(self._set_pad_click)
         self.overlay.grid_view.pad_pressed.connect(self._on_overlay_pad)
+        # ★ 「训练」——同一个按钮信号，接到训练那边 ★
+        self.overlay.handle.train_toggled.connect(self._set_train)
         self.overlay.handle.drag_started.connect(self._on_handle_drag_start)
         self.overlay.handle.drag_finished.connect(self._on_handle_drag_finish)
 
@@ -542,6 +558,13 @@ class ControlWindow(BuilderMixin, QMainWindow):
         self._status_refresh_sidebar()
         self.statusBar().showMessage('已载入 %s' % os.path.basename(path))
         self._save_config()
+        # ★ 换谱面时训练要跟着重来 ★
+        #   训练序列是**载入那一刻**从谱面摊平出来的（`_train_sequence`）。
+        #   换了谱面而序列不换的话，会拿着旧曲子的音名去对新的点击 ——
+        #   用户看到的是"我明明按对了它说不是这个"。
+        #   重来（而不是关掉）是因为换谱面多半就是"这首练完了换一首"。
+        if self.overlay.handle.btn_train.isChecked():
+            self._set_train(True)
 
     # ------------------------------------------------------------------
     # ★ 删谱面 ★
@@ -586,6 +609,10 @@ class ControlWindow(BuilderMixin, QMainWindow):
         self.overlay.set_song_name('还没有载入谱面')
         self.lbl_sheet.setText('还没有载入谱面')
         self.lbl_time.setText('00:00.0 / 00:00.0')
+        # 谱面都没了，训练序列就是一堆对不上号的音名 —— 关掉它，
+        # 别留一块"点什么都不对"的面板挂在那儿。
+        if self.overlay.handle.btn_train.isChecked():
+            self._set_train(False)
 
     def _delete_sheet(self, item=None):
         """把侧栏里那份谱面**连文件一起**删掉。
@@ -875,6 +902,107 @@ class ControlWindow(BuilderMixin, QMainWindow):
             return                      # 没变就别白白重绘一遍
         gv.keys_only = solo
         gv.update()
+
+    # ---- ★ 训练 ★ ----
+    #
+    #   用户：「跟打功能旁边再增加一个训练功能，具体就是去点按键，
+    #   但是不是按照曲子顺序来是按照音符顺序来，自己点，
+    #   点一个继续下一个」。
+    #
+    #   跟「跟打」的区别一句话：
+    #     跟打看**时间** —— 播放进度在跑，你得跟上；
+    #     训练看**顺序** —— 第 1、2、3… 个音，点对当前这个才亮下一个。
+    #   也就是把"什么时候点"交给谱面顺序、"来不来得及"交给自己。
+
+    def _train_sequence(self) -> list[str]:
+        """训练序列 —— 谱面里所有音，按**先后顺序**摊平成一串。
+
+        ★ 和弦展开成单个音 ★
+          用户要的就是"按音符顺序来"。一个和弦 `1&3&5` 里有三个音，
+          在训练里就是连着点三下 —— 这样"下一个是哪个"永远有唯一答案，
+          点对点错一眼就知道。
+          不这么做的话，"和弦算一个还是算三个"就成了要额外解释的规则，
+          而训练最不需要的就是规则。
+
+        ★ 休止符跳过 ★
+          它没有键可按。"下一个"必须是点得到的东西。
+        """
+        if not self.tl:
+            return []
+        out: list[str] = []
+        for item in self.tl.items:
+            if item.chord.is_rest:
+                continue
+            out.extend(item.chord.pitches)
+        return out
+
+    def _set_train(self, on: bool):
+        """开 / 关训练。开的时候在谱面窗**右边**摆一块训练面板。"""
+        on = bool(on)
+        self.overlay.handle.set_train(on)
+        if not on:
+            self.train.hide()
+            self.statusBar().showMessage('训练：关着')
+            return
+        seq = self._train_sequence()
+        if not seq:
+            # 没谱面（或者谱面里一个音都没有）—— 把按钮弹回去，
+            # 别留一个"开着但什么也不显示"的状态在那儿骗人。
+            self.overlay.handle.set_train(False)
+            self.statusBar().showMessage(
+                '训练：没有谱面（或者谱面里一个音都没有）')
+            return
+        self._train_seq = seq
+        self._train_i = 0
+        # ★ 摆在谱面窗右边 ★
+        #   用户：「点这个旁边会直接显示另外一个铺面」——
+        #   "旁边"就是右边；尺寸跟谱面窗一样，两个并排看着齐。
+        self.train.setGeometry(self.overlay.x() + self.overlay.width() + 12,
+                               self.overlay.y(),
+                               self.overlay.width(),
+                               self.overlay.height())
+        self.train.set_song_name(self.overlay.lbl_song.text())
+        self.train.show()
+        self._train_refresh()
+
+    def _train_refresh(self):
+        """把目标格和进度刷到训练面板上。"""
+        n = len(self._train_seq)
+        i = self._train_i
+        if i >= n:
+            self.train.set_target(None, '')
+            self.statusBar().showMessage('训练：练完了（一共 %d 个音）' % n)
+            return
+        pitch = self._train_seq[i]
+        self.train.set_target(layout.pitch_to_cell(pitch),
+                              '%d / %d' % (i + 1, n))
+        self.statusBar().showMessage(
+            '训练：第 %d / %d 个 —— %s' % (i + 1, n, pitch))
+
+    def _on_train_pad(self, pitch: str):
+        """在训练面板上点了一格 —— 对就前进，错就停在原地。
+
+        ★ 点错为什么"不动"，而不是"跳过" ★
+          训练的全部意义就是"点对当前这个"。允许错着往下走的话，
+          它跟随便乱点就没区别了，什么也练不出来。
+          给一条 toast 说清该按哪个，然后停在这儿等你点对。
+        """
+        if not self.overlay.handle.btn_train.isChecked():
+            return
+        n = len(self._train_seq)
+        i = self._train_i
+        if i >= n:
+            return
+        want = self._train_seq[i]
+        if pitch == want:
+            self._train_i += 1
+            # 点对了让训练面板上那一格自己闪一下（跟打击垫同一套反馈）
+            self.train.grid.set_flash(pitch, 0.25, min_gap=0.02)
+            self._train_refresh()
+            if self._train_i >= n:
+                self.overlay.show_toast('训练完成：一共 %d 个音' % n, 2.5)
+        else:
+            self.overlay.show_toast('不是这个 —— 该按 %s' % want, 1.2)
 
     def _pick_sheet_menu(self):
         """浮窗上点「选曲」—— 弹一个菜单列出 `sheets` 里的谱子。"""
