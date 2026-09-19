@@ -966,21 +966,56 @@ class ControlWindow(BuilderMixin, QMainWindow):
         self._train_refresh()
 
     def _train_refresh(self):
-        """把目标格和进度刷到训练面板上。"""
+        """把目标格、进度、还有"接下来几个在哪"刷到训练面板上。"""
         n = len(self._train_seq)
         i = self._train_i
+        g = self.train.grid
         if i >= n:
+            g.train_next = []
+            g.train_repeat = 0
             self.train.set_target(None, '')
             self.statusBar().showMessage('训练：练完了（一共 %d 个音）' % n)
             return
-        pitch = self._train_seq[i]
-        self.train.set_target(layout.pitch_to_cell(pitch),
-                              '%d / %d' % (i + 1, n))
+        seq = self._train_seq
+        pitch = seq[i]
+        cell = layout.pitch_to_cell(pitch)
+
+        # ★ 当前格还要连点几下（`×N`）★
+        #   用户：「不然双击，接下来几个在哪都不知道」。
+        #   数的是"从当前这个起，后面还紧跟着同一个格子几次" ——
+        #   跟浮窗的 `repeat_run` 同一个语义，但那边吃的是 `_Frame`，
+        #   而训练不看时间、根本没有 `_Frame`，所以在这儿直接数序列。
+        rep = 1
+        while i + rep < n and layout.pitch_to_cell(seq[i + rep]) == cell:
+            rep += 1
+
+        # ★ 接下来几个在哪（序号角标）★
+        #   同格子重复的那些**不再单独列** —— 那块已经由 `×N` 说清楚了。
+        #   不这么做的话，连按五下会在同一格上叠出 `1 2 3 4` 四个角标，
+        #   比不标还糊。跳过去接着往后找，最多找 4 个。
+        nxt = []
+        k = rep
+        while i + k < n and len(nxt) < 4:
+            c2 = layout.pitch_to_cell(seq[i + k])
+            if c2 is not None and c2 != cell:
+                nxt.append((c2, len(nxt) + 1))
+            k += 1
+
+        g.train_next = nxt
+        g.train_repeat = rep
+        self.train.set_target(cell, '%d / %d' % (i + 1, n))
+        g.update()
         self.statusBar().showMessage(
-            '训练：第 %d / %d 个 —— %s' % (i + 1, n, pitch))
+            '训练：第 %d / %d 个 —— %s%s'
+            % (i + 1, n, pitch, ('（连点 %d 下）' % rep) if rep >= 2 else ''))
 
     def _on_train_pad(self, pitch: str):
         """在训练面板上点了一格 —— 对就前进，错就停在原地。
+
+        用户：「点按要有声音」+「要和示谱器一样」——
+        制谱器那个打击垫就是"点一下出一个音"，训练面板照办：
+        **点什么都响**（点错的也响），不用先去开「播放声音」。
+        自己听得见弹的是什么，才谈得上"练"。
 
         ★ 点错为什么"不动"，而不是"跳过" ★
           训练的全部意义就是"点对当前这个"。允许错着往下走的话，
@@ -989,6 +1024,14 @@ class ControlWindow(BuilderMixin, QMainWindow):
         """
         if not self.overlay.handle.btn_train.isChecked():
             return
+        # ★ 先出声 —— 不管对错 ★
+        #   跟 `_on_overlay_pad` 走同一套音源（`NotePlayer`），
+        #   所以音色跟打击垫、跟「播放声音」完全一致。
+        if self._ensure_notes():
+            try:
+                self._notes.play(pitch)
+            except Exception:
+                pass
         n = len(self._train_seq)
         i = self._train_i
         if i >= n:
@@ -996,13 +1039,16 @@ class ControlWindow(BuilderMixin, QMainWindow):
         want = self._train_seq[i]
         if pitch == want:
             self._train_i += 1
-            # 点对了让训练面板上那一格自己闪一下（跟打击垫同一套反馈）
+            # 点对了让那一格自己闪一下（跟打击垫同一套反馈）
             self.train.grid.set_flash(pitch, 0.25, min_gap=0.02)
             self._train_refresh()
             if self._train_i >= n:
                 self.overlay.show_toast('训练完成：一共 %d 个音' % n, 2.5)
         else:
             self.overlay.show_toast('不是这个 —— 该按 %s' % want, 1.2)
+        # 用鼠标点一下要花时间，点完这一下之后"接下来几个"就变了，
+        # 主动重绘一次训练面板，别等下一帧。
+        self.train.grid.update()
 
     def _pick_sheet_menu(self):
         """浮窗上点「选曲」—— 弹一个菜单列出 `sheets` 里的谱子。"""

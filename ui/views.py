@@ -205,7 +205,16 @@ class SheetView(QWidget):
         #   那是谱面提示，而训练要练的正是"不用提示也找得到键"。
         self.train_on = False
         self.train_cell: tuple[int, int] | None = None
-        self.train_text = ''          # 左上角那行进度，如 "3 / 60"
+        self.train_text = ''          # 目标格子里那行进度，如 "3 / 60"
+        # ★ 「接下来几个在哪」★
+        #   用户：「不然双击，接下来几个在哪都不知道」。
+        #   连按同一个键（`5 5 5`）的时候，光看当前亮着的那一格，
+        #   根本不知道后面还要点几下 —— 训练里这就是纯盲点。
+        #   所以由控制台算好 `[(格子, 这是第几个), …]` 传进来，
+        #   这里画成序号圆圈（跟浮窗的角标同一个样式）。
+        self.train_next: list[tuple[tuple[int, int], int]] = []
+        # 当前格还要连点几下（`×N`）—— 1 或 0 都不标
+        self.train_repeat = 0
         self._cur_stamp = 0.0            # 上一次「当前音换人」的时刻
         self.flash: dict[str, float] = {}   # 实时跟弹：音高 -> 到期时刻
         self._flash_last: dict[str, float] = {}   # 每个键上次闪的时刻（防闪花眼）
@@ -905,6 +914,38 @@ class GridView(SheetView):
                     p.drawText(QRectF(r.x(), r.y() + r.height() * 0.64,
                                       r.width(), r.height() * 0.30),
                                Qt.AlignmentFlag.AlignCenter, self.train_text)
+
+        # ★ 接下来几个在哪 —— 序号角标 ★
+        #   用户：「不然双击，接下来几个在哪都不知道」。
+        #   连按同一个键（`5 5 5`）时，光看当前亮着那一格根本不知道
+        #   后面还要点几下。样式跟浮窗那边**完全一致**（深色小圆 + 数字，
+        #   最近的那个数字用亮黄），一眼就能跟谱面窗对上。
+        for (row, col), rank in self.train_next:
+            rr = QRectF(ox + col * (cell + T.GAP),
+                        oy + (3 - row) * (cell + T.GAP), cell, cell)
+            badge = min(cell * 0.36, 28.0)
+            bx = rr.x() + max(3.0, cell * 0.05)
+            by = rr.y() + max(3.0, cell * 0.05)
+            bcircle = QRectF(bx, by, badge, badge)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor(20, 26, 40, 235)))
+            p.drawEllipse(bcircle)
+            p.setPen(QPen(T.PRESS if rank == 1
+                          else QColor(228, 234, 248)))
+            p.setFont(_fit_font(badge * 0.60, bold=True))
+            p.drawText(bcircle, Qt.AlignmentFlag.AlignCenter, str(rank))
+
+        # ★ 当前格还要连点几下 ★
+        #   `×N` 跟浮窗同款（`_paint_run`），摆在右上角 ——
+        #   左上角那块地方留给上面那些序号角标。
+        if self.train_repeat >= 2 and self.train_cell is not None:
+            row, col = self.train_cell
+            rr = QRectF(ox + col * (cell + T.GAP),
+                        oy + (3 - row) * (cell + T.GAP), cell, cell)
+            _paint_run(p, rr.right() - max(26.0, cell * 0.34) - cell * 0.04,
+                       rr.top() + cell * 0.04,
+                       max(26.0, cell * 0.34), max(16.0, cell * 0.20),
+                       self.train_repeat)
 
     def mousePressEvent(self, event):
         """「可按」打开时，点哪个格子就出哪个音。
