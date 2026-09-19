@@ -16,7 +16,7 @@ import { Timeline, timeline_from_notes } from './timeline.js';
 import * as L from './layout.js';
 import { StageRenderer, buildFrame } from './render.js';
 import { NotePlayer } from './audio.js';
-import { SheetStore, downloadText, pickTextFile, stripExt } from './store.js';
+import { SheetStore, downloadText, pickTextFile, stripExt, copyText } from './store.js';
 import { TimelineEditor } from './tledit.js';
 
 // ---------------------------------------------------------------------------
@@ -826,10 +826,25 @@ function bindEvents() {
     showPage('play');
     toast('导入成功：' + name);
   };
-  $('btn-export').onclick = () => {
+  $('btn-export').onclick = async () => {
     if (!S.sheetName) { toast('先挑一份谱面'); return; }
-    downloadText(S.sheetName + '.txt', S.store.get(S.sheetName) || '');
-    toast('已导出 ' + S.sheetName + '.txt —— 丢进电脑版的 sheets 文件夹就能用');
+    const text = S.store.get(S.sheetName) || '';
+    const saved = downloadText(S.sheetName + '.txt', text);
+    // ★ 两条路一起给 ★
+    //   装成 APK 之后是套在安卓 WebView 里跑的，`<a download>`
+    //   不一定被接住（各家实现不一致），而我没法在真机上验证。
+    //   所以下载照常触发，同时把文本塞进剪贴板 —— 万一没弹保存框，
+    //   用户粘一下就能拿到。至少保证有一条路是通的。
+    const copied = await copyText(text);
+    if (saved && copied) {
+      toast('已导出 ' + S.sheetName + '.txt（文本也复制到剪贴板了）', 3000);
+    } else if (copied) {
+      toast('谱面已复制到剪贴板 —— 粘贴到电脑上存成 .txt 就行', 3600);
+    } else if (saved) {
+      toast('已导出 ' + S.sheetName + '.txt', 2600);
+    } else {
+      toast('导出失败 —— 可以试试「另存为」或者复制文本', 3200);
+    }
   };
   $('btn-refresh').onclick = () => { refreshList(); toast('已刷新'); };
 
