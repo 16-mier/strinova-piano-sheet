@@ -1,0 +1,7 @@
+{
+  "name": "kaqiu-piano-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "卡丘琴谱器 手机版（网页应用）"
+}

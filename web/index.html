@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#10131b">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>卡丘琴谱器</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<!-- ================= 顶栏 ================= -->
+<header class="topbar">
+  <button class="icon-btn" id="btn-sheets" title="曲库">☰</button>
+  <div class="song-title">
+    <div class="song-name" id="song-name">没有载入谱面</div>
+    <div class="song-meta" id="song-meta"></div>
+  </div>
+  <button class="icon-btn" id="btn-more" title="更多">⋯</button>
+</header>
+
+<main id="main">
+
+  <!-- ================= 练琴 ================= -->
+  <section class="page is-active" id="page-play">
+    <div class="stage-wrap">
+      <canvas id="stage"></canvas>
+    </div>
+
+    <div class="transport">
+      <button class="tbtn" id="btn-home" title="回到开头">⏮</button>
+      <button class="tbtn primary" id="btn-play" title="播放/暂停">▶</button>
+      <button class="tbtn" id="btn-stop" title="停止">■</button>
+      <div class="prog-wrap">
+        <input type="range" id="progress" min="0" max="1000" value="0">
+        <div class="time-row">
+          <span id="time-now">00:00.0</span>
+          <span id="time-total">00:00.0</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="modes">
+      <button class="mode" data-mode="karaoke">跟打</button>
+      <button class="mode" data-mode="tap">可按</button>
+      <button class="mode" data-mode="train">训练</button>
+    </div>
+
+    <div class="hint" id="play-hint">点曲库挑一份谱面</div>
+  </section>
+
+  <!-- ================= 制谱 ================= -->
+  <section class="page" id="page-edit">
+    <div class="edit-tabs">
+      <button class="etab is-active" data-etab="text">谱面文本</button>
+      <button class="etab" data-etab="pads">打击垫</button>
+      <button class="etab" data-etab="timeline">时间轴</button>
+    </div>
+
+    <!-- 谱面文本 -->
+    <div class="epanel is-active" id="ep-text">
+      <textarea id="sheet-text" spellcheck="false"
+                placeholder="第一行写曲名&#10;第二行写 #BPM#，例如 #120#&#10;后面一行行写音符，用空格分开"></textarea>
+      <div class="row">
+        <button class="btn" id="btn-apply">应用文本</button>
+        <button class="btn" id="btn-sample">插入示例</button>
+        <button class="btn danger" id="btn-clear-all">清空</button>
+      </div>
+    </div>
+
+    <!-- 打击垫 -->
+    <div class="epanel" id="ep-pads">
+      <div class="stage-wrap small">
+        <canvas id="pad-canvas"></canvas>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="chk-write" checked>
+        <span>点击时同步写入谱面</span>
+      </label>
+      <div class="hint">点一下 = 出声 + 写进谱面</div>
+    </div>
+
+    <!-- 时间轴 -->
+    <div class="epanel" id="ep-timeline">
+      <div class="tl-scroll" id="tl-scroll">
+        <canvas id="tl-canvas"></canvas>
+      </div>
+      <div class="row">
+        <button class="btn" id="btn-tl-undo">撤销</button>
+        <button class="btn" id="btn-tl-zoom-out">－</button>
+        <button class="btn" id="btn-tl-zoom-in">＋</button>
+        <button class="btn danger" id="btn-tl-del">删掉选中的</button>
+      </div>
+      <div class="hint" id="tl-hint">点方块选中；按住拖动改位置</div>
+    </div>
+
+    <div class="row save-row">
+      <button class="btn" id="btn-save">保存</button>
+      <button class="btn" id="btn-save-as">另存为</button>
+      <button class="btn" id="btn-editor-close">关闭制谱</button>
+    </div>
+  </section>
+
+  <!-- ================= 曲库 ================= -->
+  <section class="page" id="page-lib">
+    <div class="lib-toolbar">
+      <button class="btn" id="btn-new-sheet">新建</button>
+      <button class="btn" id="btn-import">导入 .txt</button>
+      <button class="btn" id="btn-export">导出</button>
+      <button class="btn" id="btn-refresh">刷新</button>
+    </div>
+    <input type="file" id="file-input" accept=".txt,text/plain" hidden>
+    <ul class="sheet-list" id="sheet-list"></ul>
+    <div class="hint" id="lib-hint">
+      谱面就是普通的 .txt 文件 —— 跟电脑版是同一套格式，<br>
+      导入导出的文件两边都能直接用。
+    </div>
+  </section>
+
+</main>
+
+<!-- ================= 底部标签栏 ================= -->
+<nav class="tabbar">
+  <button class="tab is-active" data-page="play"><span class="ti">🎹</span><span>练琴</span></button>
+  <button class="tab" data-page="edit"><span class="ti">✎</span><span>制谱</span></button>
+  <button class="tab" data-page="lib"><span class="ti">♪</span><span>曲库</span></button>
+</nav>
+
+<!-- ================= 轻提示 ================= -->
+<div class="toast" id="toast"></div>
+
+<script type="module" src="js/app.js"></script>
+
+<script>
+  // ★ 离线支持 ★
+  //   装到手机上之后，静态资源和 16 个音源都已经在缓存里，
+  //   没网也能开（琴边上、游戏里想瞄一眼的时候网络未必有）。
+  //
+  //   只在 http(s) 下注册 —— `file://` 打开时浏览器不允许 Service Worker，
+  //   直接跳过，不影响使用。
+  if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').catch(function (e) {
+        console.warn('离线缓存没装上（不影响使用）：', e);
+      });
+    });
+  }
+</script>
+</body>
+</html>

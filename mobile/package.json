@@ -1,0 +1,19 @@
+{
+  "name": "kaqiu-piano-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "卡丘琴谱器 安卓版 —— 用 Capacitor 把 web/ 那套打包成 APK",
+  "scripts": {
+    "sync": "cap sync android",
+    "open": "cap open android",
+    "build": "cap sync android && cd android && gradlew.bat assembleDebug"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/core": "^6.2.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.0"
+  }
+}
