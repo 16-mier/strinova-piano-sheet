@@ -751,8 +751,14 @@ class TrainWindow(QWidget):
         return self.grid.pad_pressed
 
     def set_target(self, cell, text: str = ''):
-        """换目标格 + 那行进度。"""
-        self.grid.train_cell = cell
+        """换进度那行字。
+
+        ★ 这里不再管"目标格"了 ★
+          §16.70 之后训练面板走**跟谱面窗同一套绘制**，目标格是从
+          `train_seq` + `train_i` 自己算出来的（见 `_train_frame`）——
+          外面再设一个 `train_cell` 只会跟它打架。
+          `cell` 参数留着只是为了调用处不用改签名。
+        """
         self.grid.train_text = text
         self.grid.update()
 

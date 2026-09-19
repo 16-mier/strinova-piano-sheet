@@ -21,7 +21,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (QBrush, QColor, QConicalGradient, QFont,
                          QPainter, QPen, QPolygonF)
 from PyQt6.QtWidgets import QWidget
@@ -193,28 +193,45 @@ class SheetView(QWidget):
         # ★ 「训练」模式 ★
         #   用户：「跟打功能旁边再增加一个训练功能，具体就是去点按键，
         #   但是不是按照曲子顺序来是按照音符顺序来，自己点，
-        #   点一个继续下一个」。
+        #   点一个继续下一个」+「整体和示谱器一样，就是播放改成手动点」。
         #
         #   跟「跟打」的区别就一句话：
         #     跟打看**时间**（播放进度在跑，你得跟上）
         #     训练看**顺序**（谱面第 1、2、3… 个音，点对当前这个才亮下一个）
         #   也就是把"什么时候点"交给谱面顺序、"来不来得及"交给自己。
         #
-        #   渲染上只做一件事：**只把目标那一格点亮，其余一律压暗**。
-        #   训练时屏幕上不该有任何"后面还有几个音"的提示 ——
-        #   那是谱面提示，而训练要练的正是"不用提示也找得到键"。
+        #   ★ 显示上跟谱面窗**完全一样**（用户那句"整体和示谱器一样"）★
+        #     所以这里**不另写绘制**，只换数据源（见 `_train_frame()`）——
+        #     喂给同一套 `_paint_cells` / `_paint_labels` / `_paint_badges`。
+        #     长得一样就成了**结构上的保证**，不靠人两边对着调颜色
+        #     （第一版就是各画一套，结果底色字号全是另一套，用户一眼看出不对）。
         self.train_on = False
-        self.train_cell: tuple[int, int] | None = None
-        self.train_text = ''          # 目标格子里那行进度，如 "3 / 60"
-        # ★ 「接下来几个在哪」★
-        #   用户：「不然双击，接下来几个在哪都不知道」。
-        #   连按同一个键（`5 5 5`）的时候，光看当前亮着的那一格，
-        #   根本不知道后面还要点几下 —— 训练里这就是纯盲点。
-        #   所以由控制台算好 `[(格子, 这是第几个), …]` 传进来，
-        #   这里画成序号圆圈（跟浮窗的角标同一个样式）。
-        self.train_next: list[tuple[tuple[int, int], int]] = []
-        # 当前格还要连点几下（`×N`）—— 1 或 0 都不标
-        self.train_repeat = 0
+        self.train_seq: list[str] = []   # 摊平后的音名序列（控制台塞进来）
+        self.train_i = 0                 # 练到第几个（0 = 还没点）
+        self.train_text = ''             # 进度那行字，如 "3 / 60"
+        # 训练序列里**每个音到下一个音的间隔**（秒），控制台塞进来。
+        # 它就是"标记间隔时间"的数据源 —— 见下面的 `train_gap`。
+        self.train_gaps: list[float] = []
+
+        # ★ 「标记间隔时间」★
+        #   用户：「然后需要标记间隔时间的这样子直观」。
+        #
+        #   训练不看时间，节奏信息就丢了 —— 光知道"下一个是哪个键"，
+        #   不知道"这两个之间该隔多久"，练出来的是按键顺序、不是曲子。
+        #
+        #   所以给每个音配一个**间隔**（到下一个音还有多久），
+        #   点对之后重新起算，让**收缩圆圈**照常缩：
+        #   圈缩到中心 = "按这个节奏，现在该点下一个了"。
+        #   早点晚点都随你（训练本来就不强制节奏），圈只是那把尺子。
+        #
+        #   ★ 这个"现在"用的是 `time.monotonic()`，不是曲子的 `sec` ★
+        #     训练压根没在播放，`self.sec` 是冻的；要让圈动起来，
+        #     只能挂真实时间。反正它跟谱面时间没有任何关系。
+        self.train_gap = 0.0             # 当前音到下一个音的间隔（秒）
+        self.train_t0 = 0.0              # 当前音是什么时候点出来的
+        self._train_tick_t = QTimer(self)
+        self._train_tick_t.setInterval(16)      # ~60fps，圈看着才顺
+        self._train_tick_t.timeout.connect(self._on_train_tick)
         self._cur_stamp = 0.0            # 上一次「当前音换人」的时刻
         self.flash: dict[str, float] = {}   # 实时跟弹：音高 -> 到期时刻
         self._flash_last: dict[str, float] = {}   # 每个键上次闪的时刻（防闪花眼）
@@ -694,14 +711,29 @@ class GridView(SheetView):
         #   （标志由 `control._refresh_keys_only()` 拍板：可按开着**而且**
         #     跟打关着才置真 —— 跟打必须看提示。）
         #   放在最前面：有谱面 / 没谱面 / 演奏结束，三种情况一视同仁。
-        # ★ 「训练」模式：整屏自己画 ★
-        #   放在**最前面**，`keys_only` 之前 —— 训练和「可按」经常一起开，
+        # ★ 「训练」模式 ★
+        #   放在**最前面**（`keys_only` 之前）—— 训练和「可按」经常一起开，
         #   而 `keys_only` 那条会先 return 掉。
-        #   它不看谱面时间，所以也不走 `_frame()`（见 `_paint_train`）。
+        #   ★ 跟谱面窗**同一套绘制**，只是数据源换成训练进度 ★
+        #     用户：「整体和示谱器一样，就是播放改成手动点」。
+        #     下面这几行跟正常分支长得几乎一样，差别只有一个：
+        #     喂进去的是 `_train_frame()` 而不是 `_frame()`。
+        #   ★ 圈照画 ★ —— 它按**真实流逝时间**缩，用来标"这个音到下一个
+        #     隔多久"（用户：「需要标记间隔时间的这样子直观」）。
         if self.train_on:
             self._panel(p)
-            self._paint_train(p)
-            self._paint_flash(p)      # 点下去的青光留着当反馈
+            tf = self._train_frame()
+            if tf is None:
+                self._hint(p, '训练：没有音了')
+                self._paint_flash(p)
+                return
+            self._paint_cells(p, tf)
+            self._paint_hot_flash(p, tf)
+            self._paint_flash(p)
+            self._paint_rings(p, tf)
+            self._paint_labels(p, tf)
+            self._paint_badges(p, tf)
+            self._paint_train_hud(p, tf)
             return
 
         if self.keys_only:
@@ -867,85 +899,122 @@ class GridView(SheetView):
                 p.drawText(r, Qt.AlignmentFlag.AlignCenter,
                            layout.PAD_GRID[row][col])
 
-    def _paint_train(self, p: QPainter):
-        """「训练」模式的整屏：只画 16 个格子，把目标那一格点亮。
+    def _train_frame(self) -> _Frame | None:
+        """用**训练进度**造一个 `_Frame` —— 数据源换了，形状跟 `_frame()` 一样。
 
-        用户：「跟打功能旁边再增加一个训练功能……不是按照曲子顺序来
-        是按照音符顺序来，自己点，点一个继续下一个」。
+        用户：「整体和示谱器一样，就是播放改成手动点」。
 
-        ★ 为什么自己画、不复用 `_paint_cells` ★
-          `_paint_cells` 吃的是 `_Frame`，而 `_Frame` 是从**谱面时间**
-          算出来的 —— 训练恰恰不看时间（没在播放），曲子末尾还会整个
-          返回 `None`。这里要的是"无论时钟停在哪，16 个格子都在、
-          目标格始终亮着"，所以几何量直接取 `_geom()`（只看窗口大小），
-          跟 `_cell_at()` / `_paint_blank_cells()` 同源。
+        ★ 为什么硬造一个 `_Frame`，而不是另写一套绘制 ★
+          用户要的是"整体一样"。第一版自己画了一套（只点亮目标格、
+          其余压暗），结果底色、字号、角标全是另一套，用户一眼就看出不对。
+          喂给**同一套** `_paint_cells` / `_paint_labels` / `_paint_badges`，
+          "长得一样"就成了**结构上的保证** —— 以后改配色只改一处。
 
-        ★ 只点亮目标那一格，其余压到最暗 ★
-          训练练的就是"不靠提示也找得到键"。屏幕上再留着淡黄预告、
-          序号角标、收缩圆圈，等于开卷考试。
+        ★ `timed` 拿真实流逝时间造，不用曲子的秒 ★
+          用户：「然后需要标记间隔时间的这样子直观」。
+          训练不看时间，节奏信息就丢了 —— 光知道下一个是哪个键，
+          不知道中间该隔多久，练出来的是按键顺序、不是曲子。
+          所以每个音配一个间隔，点对之后重新起算，让**收缩圆圈**照常缩：
+          圈缩到中心 = "按这个节奏，现在该点下一个了"。
+          早点晚点都随你（训练不强制节奏），圈只是那把尺子。
+
+        ★ 几何算式跟 `_frame()` 是同一份 ★
+          两处都从"窗口大小"算，所以谱面窗和训练面板并排放着时，
+          格子位置、大小完全对得上。（跟 `_geom()` 也是一致的。）
         """
-        ox, oy, cell = self._geom()
-        for row in range(4):
-            for col in range(4):
-                target = (self.train_cell == (row, col))
-                r = QRectF(ox + col * (cell + T.GAP),
-                           oy + (3 - row) * (cell + T.GAP), cell, cell)
-                if target:
-                    r = r.adjusted(-cell * 0.08, -cell * 0.08,
-                                   cell * 0.08, cell * 0.08)
-                    p.setPen(QPen(QColor(255, 248, 214), 5.0))
-                    p.setBrush(QBrush(T.PRESS))
-                else:
-                    p.setPen(QPen(T.CELL_EDGE, 1.6))
-                    p.setBrush(QBrush(T.CELL))
-                p.drawRoundedRect(r, T.RADIUS, T.RADIUS)
+        seq = self.train_seq
+        i = self.train_i
+        if not seq or i >= len(seq):
+            return None
 
-                if not self.show_labels:
-                    continue
-                p.setPen(QPen(QColor(38, 28, 0) if target else T.TEXT_DIM))
-                p.setFont(_fit_font(cell * 0.32, bold=target))
-                p.drawText(r, Qt.AlignmentFlag.AlignCenter,
-                           layout.cell_to_pitch(row, col))
-                if target and self.train_text:
-                    # 进度写在目标格子里（音名下面那行）——
-                    # 放别处会跟格子抢地方，而这儿本来就有一行 PAD 号的位置。
-                    p.setPen(QPen(QColor(70, 52, 0)))
-                    p.setFont(_fit_font(cell * 0.17))
-                    p.drawText(QRectF(r.x(), r.y() + r.height() * 0.64,
-                                      r.width(), r.height() * 0.30),
-                               Qt.AlignmentFlag.AlignCenter, self.train_text)
+        w, h = self.width(), self.height()
+        avail_w = w - 2 * self.PAD
+        avail_h = h - self.HEADER_H - self.FOOTER_H
+        side = min(avail_w, avail_h)
+        cell = (side - 3 * T.GAP) / 4.0
+        ox = (w - side) / 2.0
+        oy = self.HEADER_H + (avail_h - side) / 2.0
 
-        # ★ 接下来几个在哪 —— 序号角标 ★
-        #   用户：「不然双击，接下来几个在哪都不知道」。
-        #   连按同一个键（`5 5 5`）时，光看当前亮着那一格根本不知道
-        #   后面还要点几下。样式跟浮窗那边**完全一致**（深色小圆 + 数字，
-        #   最近的那个数字用亮黄），一眼就能跟谱面窗对上。
-        for (row, col), rank in self.train_next:
-            rr = QRectF(ox + col * (cell + T.GAP),
-                        oy + (3 - row) * (cell + T.GAP), cell, cell)
-            badge = min(cell * 0.36, 28.0)
-            bx = rr.x() + max(3.0, cell * 0.05)
-            by = rr.y() + max(3.0, cell * 0.05)
-            bcircle = QRectF(bx, by, badge, badge)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(QColor(20, 26, 40, 235)))
-            p.drawEllipse(bcircle)
-            p.setPen(QPen(T.PRESS if rank == 1
-                          else QColor(228, 234, 248)))
-            p.setFont(_fit_font(badge * 0.60, bold=True))
-            p.drawText(bcircle, Qt.AlignmentFlag.AlignCenter, str(rank))
+        # 往后看几个 —— 跟谱面窗同一个 `preview_count`
+        n = max(1, self.preview_count)
+        group = []
+        for k in range(i, min(i + n, len(seq))):
+            pitch = seq[k]
+            c = layout.pitch_to_cell(pitch)
+            group.append(([c] if c is not None else [], False, pitch))
 
-        # ★ 当前格还要连点几下 ★
-        #   `×N` 跟浮窗同款（`_paint_run`），摆在右上角 ——
-        #   左上角那块地方留给上面那些序号角标。
-        if self.train_repeat >= 2 and self.train_cell is not None:
-            row, col = self.train_cell
-            rr = QRectF(ox + col * (cell + T.GAP),
-                        oy + (3 - row) * (cell + T.GAP), cell, cell)
-            _paint_run(p, rr.right() - max(26.0, cell * 0.34) - cell * 0.04,
-                       rr.top() + cell * 0.04,
-                       max(26.0, cell * 0.34), max(16.0, cell * 0.20),
-                       self.train_repeat)
+        # ★ 时间那两层：拿真实流逝时间当"曲子时钟" ★
+        #   当前这个音从 `train_t0` 起算，后面的按各自间隔顺延 ——
+        #   于是圈会**依次**缩到中心，把"这几个音之间各隔多久"直接画出来。
+        now = time.monotonic()
+        elapsed = max(0.0, now - self.train_t0)
+        timed = []
+        t = 0.0                       # 相对"当前音"起点的虚拟时间轴
+        for idx, (cells, rest, name) in enumerate(group):
+            gap = self._train_gap_at(i + idx)
+            start = t - elapsed       # `left` = 这个音离现在还有多久
+            timed.append((cells, rest, name, start, max(0.15, gap)))
+            t += gap
+
+        return _Frame(
+            w=w, h=h, cell=cell, side=side, ox=ox, oy=oy,
+            group=group, timed=timed,
+            orders=cell_orders(group),
+            blinking=True,            # 提示层开着：预告格、序号角标都要有
+            hot_flash=False,          # 没有"换音闪一下"（不按时间走）
+            cur_cells=group[0][0],
+        )
+
+    def _paint_train_hud(self, p: QPainter, f: _Frame):
+        """训练面板上那行进度（`3 / 60`）—— 画在**目标格子里**。
+
+        ★ 为什么塞在格子里，不单占一条 ★
+          格子下半部本来画着 "PAD N"（对着游戏找键用的），
+          训练的时候那块地方正好有用 —— 拿来放进度，
+          既不占新高度、也不跟音名抢位置。
+        ★ 字色跟着底色走 ★
+          浅底给深字、深底给浅字，跟 `_txt_for` 同一个阈值 ——
+          当前格在连按时是淡黄底，写浅字就看不见了（§16.64 那个坑）。
+        """
+        if not self.train_text or not f.cur_cells:
+            return
+        row, col = f.cur_cells[0]
+        r = self._cell_rect(f, row, col, -f.cell * 0.05)
+        fill, _edge, _txt, _ins = self._cell_style(f, 0, (row, col))
+        p.setPen(QPen(QColor(70, 52, 0) if fill.lightness() >= 140
+                      else QColor(226, 232, 246)))
+        p.setFont(_fit_font(f.cell * 0.17))
+        p.drawText(QRectF(r.x(), r.y() + r.height() * 0.64,
+                          r.width(), r.height() * 0.30),
+                   Qt.AlignmentFlag.AlignCenter, self.train_text)
+
+    def _train_gap_at(self, idx: int) -> float:
+        """训练序列里第 `idx` 个音到下一个音的间隔（秒）。
+
+        来源是控制台开训练时算好的 `train_gaps` ——
+        就是原谱面里相邻两个 `start_sec` 之差。
+        训练不看时间，但**间隔**是曲子的一部分，得留着：
+        它就是用户要的"标记间隔时间"。
+        """
+        if 0 <= idx < len(self.train_gaps):
+            return max(0.15, float(self.train_gaps[idx]))
+        return max(0.15, float(self.train_gap))
+
+    def train_start(self, i: int, gap: float):
+        """控制台点对了一个音 —— 从这一刻重新起算。
+
+        `i` 是新的下标（练到第几个），`gap` 是"这个音到下一个"的间隔。
+        """
+        self.train_i = int(i)
+        self.train_gap = max(0.15, float(gap))
+        self.train_t0 = time.monotonic()
+
+    def _on_train_tick(self):
+        """训练时那个 16ms 的小定时器 —— 只为了让圈动起来。"""
+        if not self.train_on or not self.isVisible():
+            self._train_tick_t.stop()
+            return
+        self.update()
 
     def mousePressEvent(self, event):
         """「可按」打开时，点哪个格子就出哪个音。
@@ -994,18 +1063,10 @@ class GridView(SheetView):
         `cell` 是格子的 `(row, col)`，只有判断"当前格是不是连按的开头"
         时才需要 —— 见下面那段。
         """
-        # ★ 训练模式优先于一切 ★
-        #   「训练」开着的时候**不看谱面时间**（`f.blinking` 可能是假的，
-        #   因为压根没在播放），只看"下一个该点的音在哪一格"。
-        #   目标格给亮黄底 + 近白的粗边 + 深字（对比拉到最大），
-        #   其余全部压成最暗的 `T.CELL` / `T.TEXT_DIM` ——
-        #   训练时要练的就是"不用提示也找得到键"，
-        #   屏幕上不该再留着"后面还有几个音"的预告。
-        if self.train_on:
-            if cell is not None and cell == self.train_cell:
-                return (T.PRESS, QColor(255, 248, 214), QColor(38, 28, 0),
-                        -f.cell * 0.08)
-            return T.CELL, T.CELL_EDGE, T.TEXT_DIM, 0.0
+        # （这里原来有一段「训练模式优先于一切」：目标格亮黄、其余压暗。
+        #   §16.70 删掉了 —— 用户要的是"整体和示谱器一样"，
+        #   训练面板就该用**同一套**配色，不该自己长一副样子。
+        #   现在训练也走下面这些分支，只是 `f` 是 `_train_frame()` 造的。）
 
         if rank is None or not f.blinking:
             # ★ 实时跟弹时，后面几个音的「淡黄预告格」也要一起关掉 ★

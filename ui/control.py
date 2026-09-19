@@ -140,6 +140,7 @@ class ControlWindow(BuilderMixin, QMainWindow):
         self.train = TrainWindow()
         self.train.grid.pad_pressed.connect(self._on_train_pad)
         self._train_seq: list[str] = []      # 摊平之后的音名序列
+        self._train_gaps: list[float] = []   # 每个音到下一个的间隔（秒）
         self._train_i = 0                    # 练到第几个了
 
         # ★ 主题要在 `_build()` **之前**装 ★
@@ -914,8 +915,8 @@ class ControlWindow(BuilderMixin, QMainWindow):
     #     训练看**顺序** —— 第 1、2、3… 个音，点对当前这个才亮下一个。
     #   也就是把"什么时候点"交给谱面顺序、"来不来得及"交给自己。
 
-    def _train_sequence(self) -> list[str]:
-        """训练序列 —— 谱面里所有音，按**先后顺序**摊平成一串。
+    def _train_sequence(self) -> tuple[list[str], list[float]]:
+        """训练序列 + 每个音的间隔 —— 谱面里所有音按**先后顺序**摊平。
 
         ★ 和弦展开成单个音 ★
           用户要的就是"按音符顺序来"。一个和弦 `1&3&5` 里有三个音，
@@ -926,25 +927,45 @@ class ControlWindow(BuilderMixin, QMainWindow):
 
         ★ 休止符跳过 ★
           它没有键可按。"下一个"必须是点得到的东西。
+
+        ★ 间隔就是这个音到下一个音的时间差 ★
+          用户：「然后需要标记间隔时间的这样子直观」。
+          训练不看时间，但"这两个音之间隔多久"是**曲子的一部分** ——
+          只练按键顺序不练节奏，练出来的不是那首曲子。
+          和弦内部那几个音的差是 0，到 `_train_gap_at` 那边会被夹到
+          下限（它们本来就该连着按下去）。
         """
         if not self.tl:
-            return []
-        out: list[str] = []
+            return [], []
+        starts: list[float] = []          # 摊平之后每个音的开始时间
+        seq: list[str] = []
         for item in self.tl.items:
             if item.chord.is_rest:
                 continue
-            out.extend(item.chord.pitches)
-        return out
+            for p in item.chord.pitches:
+                seq.append(p)
+                starts.append(item.start_sec)
+        gaps: list[float] = []
+        for i in range(len(starts)):
+            if i + 1 < len(starts):
+                gaps.append(starts[i + 1] - starts[i])
+            else:
+                # 最后一个音后面没东西了 —— 给个默认，免得圈缩完就停在那儿
+                gaps.append(0.5)
+        return seq, gaps
 
     def _set_train(self, on: bool):
         """开 / 关训练。开的时候在谱面窗**右边**摆一块训练面板。"""
         on = bool(on)
+        g = self.train.grid
         self.overlay.handle.set_train(on)
         if not on:
+            g.train_on = False
+            self._train_tick_stop()
             self.train.hide()
             self.statusBar().showMessage('训练：关着')
             return
-        seq = self._train_sequence()
+        seq, gaps = self._train_sequence()
         if not seq:
             # 没谱面（或者谱面里一个音都没有）—— 把按钮弹回去，
             # 别留一个"开着但什么也不显示"的状态在那儿骗人。
@@ -953,7 +974,12 @@ class ControlWindow(BuilderMixin, QMainWindow):
                 '训练：没有谱面（或者谱面里一个音都没有）')
             return
         self._train_seq = seq
+        self._train_gaps = gaps
         self._train_i = 0
+        # ★ 序列和间隔交给面板，它自己造 `_Frame`（见 `_train_frame`）★
+        g.train_on = True
+        g.train_seq = seq
+        g.train_gaps = gaps
         # ★ 摆在谱面窗右边 ★
         #   用户：「点这个旁边会直接显示另外一个铺面」——
         #   "旁边"就是右边；尺寸跟谱面窗一样，两个并排看着齐。
@@ -964,50 +990,43 @@ class ControlWindow(BuilderMixin, QMainWindow):
         self.train.set_song_name(self.overlay.lbl_song.text())
         self.train.show()
         self._train_refresh()
+        # 圈要动就得有人按帧重绘 —— 那个 16ms 定时器只在这个模式里跑。
+        g._train_tick_t.start()
+
+    def _train_tick_stop(self):
+        try:
+            self.train.grid._train_tick_t.stop()
+        except Exception:
+            pass
 
     def _train_refresh(self):
-        """把目标格、进度、还有"接下来几个在哪"刷到训练面板上。"""
+        """把训练进度刷到面板上。
+
+        ★ 这里为什么只剩几行 ★
+          第一版是控制台把"目标格 / 还要连点几下 / 接下来几个在哪"
+          全算好再喂过去。§16.70 之后训练面板走**跟谱面窗同一套绘制**
+          （`_paint_cells` / `_paint_badges` 那套），它自己就能从 `_Frame`
+          里算出序号角标和 `×N` —— 再喂一遍等于把同一件事算两遍，
+          两边还可能算出不一样的结果。
+          所以现在只交代两件事：**练到第几个** + **这个音的间隔**
+          （后者是给圈用的，就是用户要的"标记间隔时间"）。
+        """
         n = len(self._train_seq)
         i = self._train_i
         g = self.train.grid
         if i >= n:
-            g.train_next = []
-            g.train_repeat = 0
+            g.train_seq = []
             self.train.set_target(None, '')
             self.statusBar().showMessage('训练：练完了（一共 %d 个音）' % n)
+            self._train_tick_stop()
             return
-        seq = self._train_seq
-        pitch = seq[i]
-        cell = layout.pitch_to_cell(pitch)
-
-        # ★ 当前格还要连点几下（`×N`）★
-        #   用户：「不然双击，接下来几个在哪都不知道」。
-        #   数的是"从当前这个起，后面还紧跟着同一个格子几次" ——
-        #   跟浮窗的 `repeat_run` 同一个语义，但那边吃的是 `_Frame`，
-        #   而训练不看时间、根本没有 `_Frame`，所以在这儿直接数序列。
-        rep = 1
-        while i + rep < n and layout.pitch_to_cell(seq[i + rep]) == cell:
-            rep += 1
-
-        # ★ 接下来几个在哪（序号角标）★
-        #   同格子重复的那些**不再单独列** —— 那块已经由 `×N` 说清楚了。
-        #   不这么做的话，连按五下会在同一格上叠出 `1 2 3 4` 四个角标，
-        #   比不标还糊。跳过去接着往后找，最多找 4 个。
-        nxt = []
-        k = rep
-        while i + k < n and len(nxt) < 4:
-            c2 = layout.pitch_to_cell(seq[i + k])
-            if c2 is not None and c2 != cell:
-                nxt.append((c2, len(nxt) + 1))
-            k += 1
-
-        g.train_next = nxt
-        g.train_repeat = rep
-        self.train.set_target(cell, '%d / %d' % (i + 1, n))
+        gap = self._train_gaps[i] if i < len(self._train_gaps) else 0.5
+        g.train_text = '%d / %d' % (i + 1, n)
+        g.train_start(i, gap)             # 从这一刻重新起算（圈开始缩）
         g.update()
         self.statusBar().showMessage(
-            '训练：第 %d / %d 个 —— %s%s'
-            % (i + 1, n, pitch, ('（连点 %d 下）' % rep) if rep >= 2 else ''))
+            '训练：第 %d / %d 个 —— %s（这个音到下个隔 %.2f 秒）'
+            % (i + 1, n, self._train_seq[i], max(0.15, gap)))
 
     def _on_train_pad(self, pitch: str):
         """在训练面板上点了一格 —— 对就前进，错就停在原地。
