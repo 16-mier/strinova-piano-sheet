@@ -8861,6 +8861,110 @@ p.setPen(QPen(QColor(52, 38, 0), max(1.6, h * 0.10)))
 `42_run3_current.png`（`5 5 5` 标 ×2）、`44_single.png`（单音基线）。
 
 
+## 16.60 ★ 打包版的声音为什么跟源码版不一样 ★
+
+用户：
+
+> 「打包版本的声音跟源码的不一样啊」
+> 「把东西都完整打包进去别漏」
+
+### 根因：音源没进包，而 `app_dir()` 不等于 `_internal`
+
+源码运行时，`ui/keypad.py` 找的是
+
+```python
+os.path.join(app_dir(), 'assets', 'notes')
+```
+
+而 `app_dir()`（`core/paths.py`）是这么定义的：
+
+```python
+def app_dir() -> str:
+    """程序所在目录（源码运行 = 项目根；打包后 = exe 所在目录）。"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+```
+
+**打包后 = exe 所在目录**，也就是 `dist/卡丘琴谱器/` —— 而 `datas`
+里的东西全被塞进 `dist/卡丘琴谱器/_internal/`。
+两边对不上，`assets/notes` 在 exe 旁边根本不存在。
+
+于是 exe 第一次用音源时走 `core/synth.py::ensure_notes()` ——
+它发现有目录、没有文件，就**就地合成 16 个**（正弦 + 包络）。
+程序没报错、能出声，只是**音色跟源码版差得远**。
+
+对比一眼就看出来了：
+
+```
+源码 assets/notes/1.wav          184,234 字节   ← 游戏原声
+合成出来的（notes_synth/1.wav）   97,064 字节   ← 正弦 + 包络
+```
+
+### 修法：打完包把音源复制到 exe 旁边
+
+写进 `.spec` 末尾（`COLLECT` 之后）：
+
+```python
+_notes_src = os.path.join(SPECPATH, 'assets', 'notes')
+_notes_dst = os.path.join(SPECPATH, 'dist', '卡丘琴谱器', 'assets', 'notes')
+```
+
+★ **不能用 `datas`** ★
+  那会把 wav 放进 `_internal/assets/notes` —— 而代码找的是
+  exe 旁边的 `assets/notes`。**放错了地方等于没放**，
+  而且这个错误是静默的（程序照样跑，只是音色不对）。
+
+★ **目录不存在就跳过，绝不让构建失败** ★
+  这些 wav 是**本地的**（`.gitignore` 里有 `*.wav`，而且它们是游戏
+  提取物、不进公开仓库 —— 见 §16.56）。别人 clone 下来自己打包时
+  多半没有，那时就让程序运行时自己合成，构建照常成功。
+
+### 顺手立了一份"资源清单 + 自检"
+
+这类"没打包进去"的毛病不会报错，只会**静默降级**，
+所以光靠"应该没问题"是靠不住的。`.spec` 末尾现在打完包会念一遍：
+
+```
+[spec] 音源已拷到 exe 旁边：16 个 -> dist\卡丘琴谱器\assets\notes
+[spec] OK   卡丘琴谱器.exe
+[spec] OK   _internal/python314.dll
+[spec] OK   _internal/sheets/demo.txt
+[spec] OK   _internal/PyQt6
+[spec] OK   _internal/numpy
+[spec] OK   assets/notes（音源）
+[spec] 音源文件数：16
+```
+
+主程序读的**全部**外部文件也就这几样，逐条记在这儿：
+
+| 资源 | 从哪找 | 怎么来的 |
+| --- | --- | --- |
+| `_internal/sheets/demo.txt` | `bundled_dir()` | `datas` 里那条 `sheets` |
+| `assets/notes/*.wav` | `app_dir()` | §16.60 这段复制 |
+| `assets/app.ico` | —— | 编译进 exe |
+| `sheets/`（exe 旁边） | `app_dir()` | 运行时 `sheets_dir()` 自己建 |
+| `config.json` | `app_dir()` | 运行时自己写 |
+| `_crash.log` | `app_dir()` | 出错才有 |
+| 各种 `*.png` 按钮图标 | `app_dir()/assets/icons` | `appstyle` 运行时现画 |
+
+（后四条都是运行时生成的，不需要打包 —— 这也解释了为什么
+一开始没注意到 `assets/notes` 漏了：**有一半资源是运行时现造的**，
+"少了会自己生成"这件事在别的资源上是设计，在音源上就成了坑。）
+
+### 验证
+
+* exe 旁边 16 个 wav，**跟源码逐个比字节数，0 个不一致**；
+* 启动 exe 之后再查一遍：还是 16 个、`1.wav` 仍是 184,234 字节
+  —— 证明 `ensure_notes()` 那句 `if force or not os.path.isfile(path)`
+  **不会覆盖已存在的文件**，游戏原声不会被合成音顶掉；
+* zip 体积 54.4 MB → **56.1 MB**（多出来的 1.7 MB 就是这 16 个 wav）。
+
+> ⚠ 这个包**带着游戏音频**。自己用没问题，但别公开分发 ——
+> 公开仓库里之所以一个字节的音频都没有，理由见 §16.56。
+
+
+
 
 
 

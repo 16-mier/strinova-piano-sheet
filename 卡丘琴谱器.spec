@@ -29,6 +29,9 @@
 产物：`dist/卡丘琴谱器/`（整个文件夹一起拷走就能用，exe 在文件夹里）。
 """
 
+import os
+import shutil
+
 _EXCLUDES = [
     # 主程序一行都不碰的包（只出现在 tools/ 的分析脚本里）
     'torch', 'torchaudio', 'torchvision', 'cv2', 'scipy', 'librosa',
@@ -141,3 +144,66 @@ coll = COLLECT(
     upx_exclude=[],
     name='卡丘琴谱器',
 )
+
+# ===========================================================================
+# ★ 打包后：把"要放在 exe 旁边"的资源补上 ★
+# ===========================================================================
+#
+# 用户：「打包版本的声音跟源码的不一样啊」—— 就是这一段原来缺了。
+#
+# ★ 为什么音源不能走 `datas` ★
+#     `datas` 里的东西全被塞进 `_internal/`（= `sys._MEIPASS`），
+#     而 `ui/keypad.py` 找音源用的是
+#         os.path.join(app_dir(), 'assets', 'notes')
+#     `app_dir()`（见 `core/paths.py`）打包后返回的是
+#     **exe 所在目录**，不是 `_internal`。两边对不上 ——
+#     于是 exe 一跑发现那儿没有 wav，就地**现合成** 16 个
+#     （正弦 + 包络），音色跟源码版差得远。
+#     所以这些 wav 必须**复制到 exe 旁边**，不能打进 `_internal`。
+#
+# ★ 完整的资源清单（= 打包版跑起来会用到的东西）★
+#     `_internal/sheets/demo.txt`  内置谱面        ← `datas` 里那条 `sheets`
+#     `assets/notes/*.wav`         音源            ← 下面这段复制
+#     `assets/app.ico`             窗口图标        ← 编译进 exe
+#     `sheets/`（exe 旁边）        用户谱面目录    ← 运行时 `sheets_dir()` 自己建
+#     `config.json`                配置            ← 运行时自己写
+#     `_crash.log`                 崩溃日志        ← 出错才有
+#     各种 `*.png` 图标            按钮图标        ← `appstyle` 运行时现画
+#     最后四条都是**运行时生成**的，不需要打包。
+#
+# ★ 目录不存在就跳过，绝不让构建失败 ★
+#     这些 wav 是**本地的**（`.gitignore` 里有 `*.wav`，
+#     而且它们是游戏提取物，不进公开仓库）。
+#     别人 clone 下来自己打包时多半没有 —— 那时就让程序运行时自己合成。
+
+_notes_src = os.path.join(SPECPATH, 'assets', 'notes')
+_notes_dst = os.path.join(SPECPATH, 'dist', '卡丘琴谱器', 'assets', 'notes')
+_notes_n = 0
+if os.path.isdir(_notes_src):
+    os.makedirs(_notes_dst, exist_ok=True)
+    for _f in sorted(os.listdir(_notes_src)):
+        if _f.lower().endswith('.wav'):
+            shutil.copy2(os.path.join(_notes_src, _f),
+                         os.path.join(_notes_dst, _f))
+            _notes_n += 1
+    print('[spec] 音源已拷到 exe 旁边：%d 个 -> %s' % (_notes_n, _notes_dst))
+else:
+    print('[spec] 源码里没有 assets/notes/ —— 跳过；'
+          '打包版第一次运行时会自己合成音源（音色跟源码版不同）')
+
+# ★ 自检：该在的都在吗 ★
+#   少一样都不会当场报错（程序会静默降级，比如没音源就现合成），
+#   所以打完包必须念一遍，别等用户听出来。
+_dist = os.path.join(SPECPATH, 'dist', '卡丘琴谱器')
+_coll = os.path.join(_dist, '_internal')
+for _label, _p in (
+        ('卡丘琴谱器.exe', os.path.join(_dist, '卡丘琴谱器.exe')),
+        ('_internal/python314.dll', os.path.join(_coll, 'python314.dll')),
+        ('_internal/sheets/demo.txt', os.path.join(_coll, 'sheets', 'demo.txt')),
+        ('_internal/PyQt6', os.path.join(_coll, 'PyQt6')),
+        ('_internal/numpy', os.path.join(_coll, 'numpy')),
+        ('assets/notes（音源）', _notes_dst)):
+    _ok = os.path.isdir(_p) if _label.endswith('（音源）') or _label.endswith(
+        'PyQt6') or _label.endswith('numpy') else os.path.exists(_p)
+    print('[spec] %s %s' % ('OK  ' if _ok else '★缺 ', _label))
+print('[spec] 音源文件数：%d' % _notes_n)
