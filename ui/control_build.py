@@ -21,11 +21,12 @@ from __future__ import annotations
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDockWidget, QFormLayout, QGroupBox, QHBoxLayout,
+    QCheckBox, QComboBox, QDockWidget, QFormLayout, QHBoxLayout,
     QLabel, QListWidget, QPushButton, QSlider, QSpinBox,
     QVBoxLayout, QWidget)
 from . import appstyle
 from .hotkeys import HotkeyEdit
+from .panel import PanelBox
 
 
 class BuilderMixin:
@@ -48,8 +49,8 @@ class BuilderMixin:
         box.setSpacing(10)
 
         # ---------- 谱面 ----------
-        g_sheet = QGroupBox('谱面')
-        f = QVBoxLayout(g_sheet)
+        g_sheet = PanelBox('谱面')
+        f = g_sheet.inner
 
         row = QHBoxLayout()
         self.cmb_sheet = QComboBox()
@@ -114,8 +115,8 @@ class BuilderMixin:
         box.addWidget(g_sheet)
 
         # ---------- 播放 ----------
-        g_play = QGroupBox('播放')
-        fp = QVBoxLayout(g_play)
+        g_play = PanelBox('播放')
+        fp = g_play.inner
 
         prow = QHBoxLayout()
         # ★ 这三颗按钮的图标是自己画的，不是 ▶ / ⏹ / ⏮ 三个字符 ★
@@ -206,8 +207,15 @@ class BuilderMixin:
         #   那两条走的是 `ui/overlay.py::Player`（本地听），
         #   跟"送到虚拟声卡"是两回事。
         # ---------- 显示 ----------
-        g_view = QGroupBox('显示')
-        fv = QFormLayout(g_view)
+        g_view = PanelBox('显示')
+        # ★ 不能写成 `QFormLayout(g_view)` ★
+        #   那是"把 layout 装到 g_view 自己身上" —— 而 `PanelBox`
+        #   已经有一个外层 layout 在管标题条和内容区了。
+        #   一个 widget 只能有一个 layout，硬塞会把它挤掉
+        #   （Qt 会打一句 warning，然后标题条消失）。
+        #   所以先建一个"没有爹"的 layout，再挂到内容区上。
+        fv = QFormLayout()
+        g_view.inner.addLayout(fv)
 
         self.sp_preview = QSpinBox()
         # ★ 上限从 12 收到 5 ★
@@ -280,8 +288,8 @@ class BuilderMixin:
         box.addWidget(g_view)
 
         # ---------- 悬浮窗 ----------
-        g_pos = QGroupBox('谱面窗位置与大小')
-        fg = QVBoxLayout(g_pos)
+        g_pos = PanelBox('谱面窗位置与大小')
+        fg = g_pos.inner
 
         # ★ X / Y / 宽 / 高 四个数字框拿掉了 ★
         #   用户：「浮窗的 X/Y/宽/高 + 微调按钮」清理掉。
