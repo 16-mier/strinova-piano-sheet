@@ -127,7 +127,14 @@ body {
 
 .stage-wrap {
   flex: 1 1 auto;
-  min-height: 200px;
+  min-height: 160px;
+  /* ★ 高度要有个上限 ★
+     网格是**正方形**，边长由较窄的那一边决定（`side = min(宽,高)`）。
+     手机上宽度总是更窄的那个，所以给多高的容器都是白给 ——
+     网格还是那个尺寸，只是上下各留一大片空白，
+     看着就"偏"了（用户的原话：「网格太大或太小，不在屏幕中间」）。
+     限到 62vh 之后，网格大致居中，省下的高度留给下面那条时间轴。 */
+  max-height: 62vh;
   /* ★ 画布必须**绝对定位** ★
      第一版让 canvas 当普通 flex item，它会把自己的固有尺寸
      （就是 `canvas.width` 那个位图像素宽度）反馈给父容器 ——
@@ -137,9 +144,23 @@ body {
   position: relative;
   overflow: hidden;
 }
-.stage-wrap.small { min-height: 160px; }
+.stage-wrap.small { min-height: 140px; }
 
 #stage, #pad-canvas {
+  display: block;
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+}
+
+/* ★ 练琴页底下那条进度时间轴 ★ */
+.strip-wrap {
+  flex: 0 0 auto;
+  height: 62px;
+  position: relative;
+  overflow: hidden;
+}
+#strip {
   display: block;
   position: absolute;
   inset: 0;
@@ -315,19 +336,51 @@ input[type="range"]::-moz-range-thumb {
 }
 .check input { width: 18px; height: 18px; accent-color: var(--accent); }
 
-.tl-scroll {
+.tl-wrap {
   flex: 1 1 auto;
-  min-height: 200px;
-  /* ★ 滚动由画布自己实现，别让浏览器再插一条 ★
-     第一版写的是 `overflow: auto`，于是画布比容器宽出一两个像素
-     （子像素舍入）就冒出一条灰色横滚动条 —— 而横向滚动是
-     单指拖拽做的（见 `tledit.js` 的注释），那条滚动条纯属碍事。 */
+  min-height: 180px;
+  position: relative;
   overflow: hidden;
+}
+
+.tl-scroll {
+  position: absolute;
+  inset: 0;
+  /* ★ 横向滚动交给浏览器 ★
+     第一版是自己算 scrollX、自己拦 pointermove —— 手机上不跟手
+     （没有惯性，跟浏览器自己的手势也打架，用户的原话是
+      「没办法拖动时间轴」）。
+     现在画布直接铺成"内容那么宽"，这里只要能滚就行 ——
+     甩动、惯性、边缘回弹全是白送的。 */
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
   background: var(--input);
   border: 1px solid var(--edge);
   border-radius: var(--radius);
 }
-#tl-canvas { display: block; touch-action: none; }
+.tl-scroll::-webkit-scrollbar { height: 6px; }
+.tl-scroll::-webkit-scrollbar-track { background: transparent; }
+.tl-scroll::-webkit-scrollbar-thumb {
+  background: var(--edge-hi);
+  border-radius: 3px;
+}
+#tl-canvas {
+  display: block;
+  /* `pan-x` = 让浏览器处理横向滑动（滚时间轴），
+     而纵向和"长按拖动"由 JS 接管 —— 见 `tledit.js` 里长按那段 */
+  touch-action: pan-x;
+}
+
+/* ★ 轨道头：固定压在最左边，不跟着滚 ★ */
+.tl-heads {
+  position: absolute;
+  left: 1px;              /* 跟 `.tl-scroll` 的边框对齐 */
+  top: 1px;
+  pointer-events: none;   /* 别挡住底下的滑动 */
+  border-top-left-radius: var(--radius);
+}
 
 /* ================= 曲库页 ================= */
 

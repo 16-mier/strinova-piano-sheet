@@ -17,7 +17,8 @@ import * as L from './layout.js';
 import { StageRenderer, buildFrame } from './render.js';
 import { NotePlayer } from './audio.js';
 import { SheetStore, downloadText, pickTextFile, stripExt, copyText } from './store.js';
-import { TimelineEditor } from './tledit.js';
+import { TimelineEditor, NOTE_W, LONG_PRESS_MS, MOVE_TOLERANCE } from './tledit.js';
+import { TimelineStrip } from './tlstrip.js';
 
 // ---------------------------------------------------------------------------
 // 内置示例（第一次打开时塞进曲库）
@@ -75,6 +76,7 @@ const S = {
 let stage = null;       // StageRenderer（练琴页）
 let pad = null;         // StageRenderer（制谱页的打击垫）
 let tled = null;        // TimelineEditor（制谱页的时间轴）
+let strip = null;       // TimelineStrip（练琴页那条只读进度条）
 let editingName = '';   // 制谱器正在编辑哪一份
 
 const $ = (id) => document.getElementById(id);
@@ -212,12 +214,35 @@ function tick(now) {
 
   drawStage();
   drawPad();
+  drawStrip();
   drawTimeline();
   requestAnimationFrame(tick);
 }
 
 /**
+ * 练琴页底下那条进度时间轴。
+ *
+ * ★ 为什么每帧都画 ★
+ *   它上面的播放头要跟着播放走 —— 这是演奏时唯一的"到哪儿了"参照。
+ *   画的东西不多（几十个竖条 + 一条线），代价可以接受。
+ */
+function drawStrip() {
+  if (!strip) return;
+  const cv = $('strip');
+  if (!cv.clientWidth || !cv.clientHeight) return;
+  if (cv.clientWidth !== strip.cssW || cv.clientHeight !== strip.cssH) {
+    fitCanvas(cv, strip);
+  }
+  strip.draw(S.timeline, S.sec);
+}
+
+/**
  * 画制谱页那条时间轴。
+ *
+ * ★ 尺寸是按**内容**算的，不是按视口 ★
+ *   画布宽度 = 整首曲子的时长 × 缩放 + 右边留白 ——
+ *   比视口宽得多，外面那个 `.tl-scroll` 才有东西可滚。
+ *   轨道行高则跟着视口高度撑 —— 视口高的时候别让下面空一大片。
  *
  * ★ 看不见的时候不画 ★
  *   它在另一个标签页里（`display: none`），`clientWidth` 是 0 ——
@@ -226,16 +251,19 @@ function tick(now) {
 function drawTimeline() {
   if (!tled) return;
   const cv = $('tl-canvas');
-  if (!cv.clientWidth || !cv.clientHeight) return;
-  if (cv.clientWidth !== tled.cssW || cv.clientHeight !== tled.cssH) {
-    fitCanvas(cv, tled);
-  }
+  const wrap = cv.parentElement;
+  if (!wrap.clientWidth || !wrap.clientHeight) return;
   const items = S.timeline ? S.timeline.items : [];
-  tled.draw(items, {
-    sec: S.sec,
-    totalSec: S.timeline ? S.timeline.total_sec : 0,
-    laneCount: S.timeline && S.timeline.items.length > 60 ? 12 : 6,
-  });
+  const total = S.timeline ? S.timeline.total_sec : 0;
+  tled.layout(wrap.clientWidth, wrap.clientHeight, total);
+  // ★ 4 条轨道，不是 6 ★
+  //   这台琴是 4×4 的，音高落在 4 行上（见 `layout.PAD_GRID`）——
+  //   桌面版那个 6 是"6 条自由轨道"（音符可以放任意轨道），
+  //   而手机版是按音高自动分轨的，画 6 条会有两条永远空着。
+  tled.draw(items, { sec: S.sec, totalSec: total, laneCount: 4 });
+  // 轨道头是**另一张画布**（固定在左边不跟着滚），单独画
+  const heads = $('tl-heads');
+  if (heads) tled.drawHeads(heads, wrap.clientHeight);
 }
 
 /** 把这一小段时间里"该响"的音放出来。 */
@@ -661,6 +689,29 @@ function bindEvents() {
   });
   cv.addEventListener('pointerleave', () => { S.hover = null; });
 
+  // ---- 练琴页那条进度时间轴：点或拖都能跳过去 ----
+  const scv = $('strip');
+  let stripSeeking = false;
+  const stripSeek = (ev) => {
+    if (!strip || !S.timeline || !S.timeline.total_sec) return;
+    const r = scv.getBoundingClientRect();
+    S.sec = strip.xToSec(ev.clientX - r.left, S.timeline.total_sec);
+    S._soundPtr = nextIndexAt(S.sec);
+    updateProgressUI();
+  };
+  scv.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    stripSeeking = true;
+    try { scv.setPointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ }
+    stripSeek(ev);
+  });
+  scv.addEventListener('pointermove', (ev) => {
+    if (stripSeeking) stripSeek(ev);
+  });
+  const stripEnd = () => { stripSeeking = false; };
+  scv.addEventListener('pointerup', stripEnd);
+  scv.addEventListener('pointercancel', stripEnd);
+
   // ---- 制谱页 ----
   for (const t of document.querySelectorAll('.etab')) {
     t.onclick = () => {
@@ -675,9 +726,10 @@ function bindEvents() {
       if (k === 'timeline') {
         requestAnimationFrame(() => {
           if (!tled) return;
-          fitCanvas($('tl-canvas'), tled);
-          // 一进来就把视野对准第一个音，别让用户对着空白找
-          tled.scrollX = 0;
+          // 滚动是浏览器的，直接把它拨回最左边
+          const wrap = $('tl-scroll');
+          if (wrap) wrap.scrollLeft = 0;
+          drawTimeline();          // 让它按当前视口重排一次
         });
       }
     };
@@ -685,58 +737,89 @@ function bindEvents() {
 
   $('sheet-text').oninput = onTextChanged;
 
-  // ---- 时间轴：单指横拖滚、点音符选中、按住拖动改时间 ----
+  // ---- 时间轴：横向滚动交给浏览器，**长按**才拖方块 ----
+  //
+  // ★ 为什么要分"长按"和"直接拖" ★
+  //   滚动交给浏览器之后，"手指按在方块上左右滑"到底是滚时间轴
+  //   还是拖这个方块，就冲突了。长按（250ms）是手机上"拖东西"的
+  //   通用约定 —— 按住不动一下，才进入拖动模式，之前移动都算滚动。
   const tcv = $('tl-canvas');
-  let drag = null;
+  let press = null;
+  let holdTimer = 0;
 
-  const localXY = (ev, el) => {
-    const r = el.getBoundingClientRect();
+  // 画布内部坐标：`rect` 已经含了滚动偏移，直接减就行
+  const canvasXY = (ev) => {
+    const r = tcv.getBoundingClientRect();
     return [ev.clientX - r.left, ev.clientY - r.top];
+  };
+
+  const endPress = () => {
+    clearTimeout(holdTimer);
+    if (press && press.dragging) {
+      syncTimelineToText();          // 拖完把改动写回文本
+      tcv.style.touchAction = 'pan-x';
+    } else if (press) {
+      // 短按 = 选中
+      const items = S.timeline ? S.timeline.items : [];
+      const it = items[press.idx];
+      if (it) {
+        tled.sel = press.idx;
+        toast('选中 ' + it.chord.pitches.join('&'), 1200);
+      }
+    }
+    press = null;
   };
 
   tcv.addEventListener('pointerdown', (ev) => {
     if (!tled) return;
-    ev.preventDefault();
-    tcv.setPointerCapture(ev.pointerId);
-    const [x, y] = localXY(ev, tcv);
+    const [x, y] = canvasXY(ev);
     const items = S.timeline ? S.timeline.items : [];
     const hit = tled.itemAt(items, x, y);
-    if (hit !== null) {
-      tled.sel = hit;
-      const g = tled.geom(items, hit);
-      drag = { mode: 'note', idx: hit, dx: x - g.x };
-    } else {
-      tled.sel = null;
-      drag = { mode: 'scroll', x0: x, scroll0: tled.scrollX };
+    if (hit === null) {
+      tled.sel = null;               // 点空白 = 取消选中（但照样能滚）
+      return;
     }
+    press = { idx: hit, x0: ev.clientX, y0: ev.clientY,
+              pointerId: ev.pointerId, dragging: false };
+    holdTimer = setTimeout(() => {
+      if (!press) return;
+      press.dragging = true;
+      tled.sel = press.idx;
+      // ★ 拖动期间临时关掉横向滚动 ★
+      //   `touch-action: pan-x` 一进入滚动，后面再 `preventDefault`
+      //   是拦不住的（浏览器已经接管了）。所以要提前改掉它。
+      tcv.style.touchAction = 'none';
+      try { tcv.setPointerCapture(press.pointerId); } catch (e) { /* 忽略 */ }
+      if (navigator.vibrate) navigator.vibrate(12);
+    }, LONG_PRESS_MS);
   });
 
   tcv.addEventListener('pointermove', (ev) => {
-    if (!drag || !tled) return;
-    const [x] = localXY(ev, tcv);
-    if (drag.mode === 'scroll') {
-      tled.scrollX = Math.max(0, drag.scroll0 - (x - drag.x0));
+    if (!press) return;
+    if (!press.dragging) {
+      const dx = Math.abs(ev.clientX - press.x0);
+      const dy = Math.abs(ev.clientY - press.y0);
+      if (dx > MOVE_TOLERANCE || dy > MOVE_TOLERANCE) {
+        // 手指挪远了 —— 这是想滚，不是想拖
+        clearTimeout(holdTimer);
+        press = null;
+      }
       return;
     }
+    ev.preventDefault();
     const items = S.timeline ? S.timeline.items : [];
-    const it = items[drag.idx];
+    const it = items[press.idx];
     if (!it) return;
-    // 改时间：跟着手指走，吸附到 0.05 秒（免得拖出 1.234567 这种数）
-    const raw = Math.max(0, tled.xToSec(x - drag.dx));
-    it.start_sec = Math.round(raw / 0.05) * 0.05;
-    it.end_sec = it.start_sec;      // 时值交给"铺到下一个音"，这里不用管
+    const [x] = canvasXY(ev);
+    // 吸附到 0.05 秒 —— 免得拖出 1.234567 这种数
+    const sec = Math.round(tled.xToSec(x - NOTE_W / 2) / 0.05) * 0.05;
+    it.start_sec = Math.max(0, sec);
+    it.end_sec = it.start_sec;
     it.chord.at = it.start_sec;
   });
 
-  const endDrag = () => {
-    if (drag && drag.mode === 'note') {
-      // 拖完把改动写回文本 —— 不然"保存"存下去的还是旧的
-      syncTimelineToText();
-    }
-    drag = null;
-  };
-  tcv.addEventListener('pointerup', endDrag);
-  tcv.addEventListener('pointercancel', endDrag);
+  tcv.addEventListener('pointerup', endPress);
+  tcv.addEventListener('pointercancel', endPress);
 
   $('btn-apply').onclick = () => { onTextChanged(); toast('已应用'); };
   $('btn-clear-all').onclick = () => {
@@ -865,6 +948,7 @@ async function boot() {
   stage = new StageRenderer($('stage'));
   pad = new StageRenderer($('pad-canvas'));
   tled = new TimelineEditor($('tl-canvas'));
+  strip = new TimelineStrip($('strip'));
 
   bindEvents();
 

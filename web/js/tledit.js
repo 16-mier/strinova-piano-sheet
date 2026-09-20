@@ -1,44 +1,67 @@
-// 时间轴编辑器 —— 手机上那条可横向滚动、能拖音符的轨道区。
+// 制谱页的时间轴编辑器。
 //
-// 视觉照桌面版 `ui/timeline_edit.py` 那套（那是按 Premiere 的分区做的）：
-//   顶部标尺 + 左侧轨道头 + 轨道斑马纹 + 圆角音符块。
-// 手机上做了三处让步：轨道矮一点、轨道头窄一点、默认视野短一点。
+// ★ 这一版跟第一版的三个区别（都是用户实测之后提的）★
 //
-// 交互设计（手机没有右键、没有 Shift）：
-//   · 单指横向拖   → 滚时间轴
-//   · 点音符       → 选中
-//   · 按住音符拖   → 改它的时间（左右）和轨道（上下）
-//   · 点空白       → 取消选中
+//   一、**方块等宽**，不再跟时值走
+//       用户：「时间轴的方块时长不是固定的」。
+//       第一版学的是剪辑软件：方块宽度 = 这个音的时值（长的音方块长）。
+//       那在音频编辑里是对的，可这是**按键序列** —— 用户要读的是
+//       "第几个音、在哪儿"，长度忽长忽短反而看不清节奏。
+//       现在每个音一个固定宽度的方块，**位置**照旧反映时间。
+//
+//   二、**横向滚动交给浏览器**（`overflow-x: auto`）
+//       用户：「没办法拖动时间轴」。
+//       第一版是自己算 scrollX、自己拦 pointermove —— 在手机上不跟手
+//       （没有惯性、跟浏览器的手势也打架）。
+//       现在画布直接铺成"内容那么宽"，外面套一个原生滚动容器，
+//       甩动、惯性、边缘回弹全部免费。
+//
+//   三、**长按才进入拖动**
+//       既然滚动交给浏览器了，手指按在方块上左右滑到底是"滚"还是"拖方块"
+//       就冲突了。所以：**按住 250ms 才变成拖方块**
+//       （会有一次轻微震动反馈），之前移动就算滚动。
+//       这也是手机上"拖东西"的通用做法。
+//
+//   ★ 时间线 ★
+//     标尺上有数字刻度，轨道区里有贯穿的竖向网格线 —— 用户说
+//     「也没有时间线」，第一版那几条太淡了。
 
-import { pitch_to_cell } from './layout.js';
+import { pitch_to_cell, PAD_GRID } from './layout.js';
 
-const RULER_H = 26;
-const ROW_H = 34;
-const HEADER_W = 46;
+export const RULER_H = 30;      // 顶部标尺（放时间数字 + 播放头把手）
+export const ROW_H = 40;        // 每条轨道的高度
+export const HEADER_W = 48;     // 左侧轨道头的宽度
+export const NOTE_W = 36;       // ★ 方块固定宽度 ★
 export const DEFAULT_LANES = 6;
 export const LANES_MAX = 12;
+
+const PAD_RIGHT = 90;           // 右边留一截，最后一个音不至于贴着边
+
+const LONG_PRESS_MS = 250;
+const MOVE_TOLERANCE = 8;       // 手指挪超过这么多像素就算"在滚"
 
 const C = {
   bg: '#0d1017',
   ruler: '#101520',
-  rulerEdge: 'rgba(255,255,255,0.18)',
   rulerText: '#96a0b8',
-  laneA: 'rgba(255,255,255,0.031)',
-  laneB: 'rgba(255,255,255,0.078)',
+  rulerLine: 'rgba(255,255,255,0.16)',
+  grid: 'rgba(255,255,255,0.065)',      // 轨道区里的竖向网格线
+  laneA: 'rgba(255,255,255,0.028)',
+  laneB: 'rgba(255,255,255,0.072)',
   laneLine: 'rgba(255,255,255,0.10)',
   head: '#161a24',
-  headEdge: 'rgba(255,255,255,0.10)',
   headText: '#96a0b8',
+  headEdge: 'rgba(255,255,255,0.10)',
   playhead: '#ff5c5c',
   sel: '#46ebbe',
-  // 音区配色（跟桌面版 `theme.ZONE_COLORS` 一致）
-  zones: [
-    'rgba(120,200,255,0.92)',   // 中音区
-    'rgba(140,235,190,0.92)',   // 中音高段
-    'rgba(255,190,120,0.92)',   // 高音区
-    'rgba(240,150,220,0.92)',   // 倍高音
-  ],
   noteText: '#0d1017',
+  // 音区配色（跟 `theme.ZONE_COLORS` 一致）
+  zones: [
+    'rgba(120,200,255,0.95)',
+    'rgba(140,235,190,0.95)',
+    'rgba(255,190,120,0.95)',
+    'rgba(240,150,220,0.95)',
+  ],
 };
 
 export class TimelineEditor {
@@ -47,132 +70,151 @@ export class TimelineEditor {
     this.ctx = canvas.getContext('2d');
     this.lanes = DEFAULT_LANES;
     this.pxPerSec = 90;
-    this.scrollX = 0;      // 已经滚过去多少像素
+    this.sel = null;
     this.dpr = 1;
-    this.sel = null;       // 选中的音符下标
     this._size = '';
+    this._headKey = '';
+    this.contentW = 0;
+    this.holdTimer = 0;
+    this.dragging = false;      // 正在拖方块
+    this.onChanged = null;      // 拖完之后通知外面（写回文本）
   }
 
-  layout(cssW, cssH) {
+  /**
+   * 按**内容**尺寸调整画布（不是视口尺寸）——
+   * 宽 = 整首曲子的时长 × 缩放 + 右边留白，高 = 视口高度。
+   * 这样外面那个滚动容器才有东西可滚。
+   */
+  layout(viewW, viewH, totalSec) {
     const dpr = Math.min(3, window.devicePixelRatio || 1);
-    const key = cssW + 'x' + cssH + '@' + dpr;
+    const needW = Math.max(viewW, Math.ceil(totalSec * this.pxPerSec) + PAD_RIGHT);
+    const key = needW + 'x' + viewH + '@' + dpr;
     if (key !== this._size) {
-      this.canvas.width = Math.max(1, Math.round(cssW * dpr));
-      this.canvas.height = Math.max(1, Math.round(cssH * dpr));
-      this.canvas.style.width = cssW + 'px';
-      this.canvas.style.height = cssH + 'px';
+      this.canvas.width = Math.max(1, Math.round(needW * dpr));
+      this.canvas.height = Math.max(1, Math.round(viewH * dpr));
+      this.canvas.style.width = needW + 'px';
+      this.canvas.style.height = viewH + 'px';
       this._size = key;
     }
     this.dpr = dpr;
-    this.cssW = cssW;
-    this.cssH = cssH;
-    this.trackW = Math.max(10, cssW - HEADER_W);
+    this.cssW = needW;
+    this.cssH = viewH;
+    this.contentW = needW;
+    // 轨道行高按可用高度撑开 —— 视口高的时候别让下面空一大片。
+    //   上限给到 120：这台琴就 4 行（见 `layout.PAD_GRID`），
+    //   4 条轨道要把整块区域铺满才好看，而 90 以下又会显得太挤。
+    const availH = Math.max(60, viewH - RULER_H);
+    this.rowH = Math.max(34, Math.min(120, availH / this.lanes));
   }
 
-  laneY(lane) { return RULER_H + lane * ROW_H; }
-  get lanesBottom() { return RULER_H + this.lanes * ROW_H; }
+  laneY(lane) { return RULER_H + lane * this.rowH; }
+  get lanesBottom() { return RULER_H + this.lanes * this.rowH; }
 
-  secToX(sec) { return HEADER_W + sec * this.pxPerSec - this.scrollX; }
-  xToSec(x) { return (x - HEADER_W + this.scrollX) / this.pxPerSec; }
+  secToX(sec) { return HEADER_W + sec * this.pxPerSec; }
+  xToSec(x) { return Math.max(0, (x - HEADER_W) / this.pxPerSec); }
 
-  /** 纵向 -> 轨道号；不在轨道区就返回 null。 */
   laneAt(y) {
     if (y < RULER_H || y >= this.lanesBottom) return null;
-    const i = Math.floor((y - RULER_H) / ROW_H);
+    const i = Math.floor((y - RULER_H) / this.rowH);
     return i >= 0 && i < this.lanes ? i : null;
   }
 
-  /** 命中哪个音符 —— 从后往前找（后画的在上面）。 */
+  /** 命中哪个方块。x 是**画布内部坐标**（外面已经加过滚动偏移了）。 */
   itemAt(items, x, y) {
     const lane = this.laneAt(y);
     if (lane === null) return null;
+    // 从后往前，后画的在上面
     for (let i = items.length - 1; i >= 0; i--) {
       const g = this.geom(items, i);
       if (!g || g.lane !== lane) continue;
-      if (x >= g.x && x <= g.x + g.w && y >= g.y + 3 && y <= g.y + ROW_H - 3) {
-        return i;
-      }
+      if (x >= g.x && x <= g.x + NOTE_W) return i;
     }
     return null;
   }
 
-  /** 音符在屏幕上的方块。宽度铺到下一个音（桌面版就是"自动铺满"的规矩）。 */
+  /** 方块的位置（等宽）。 */
   geom(items, i) {
     const it = items[i];
     if (!it || it.chord.is_rest) return null;
     const lane = laneOf(it.chord.pitches);
     if (lane === null) return null;
-    const x = this.secToX(it.start_sec);
-    const next = items[i + 1];
-    const endSec = next ? Math.max(it.start_sec + 0.08, next.start_sec)
-                        : it.start_sec + 0.5;
-    const w = Math.max(12, (endSec - it.start_sec) * this.pxPerSec - 2);
-    return { x, y: this.laneY(lane) + 3, w, h: ROW_H - 6, lane, it };
+    return {
+      x: this.secToX(it.start_sec),
+      y: this.laneY(lane) + 4,
+      w: NOTE_W,
+      h: this.rowH - 8,
+      lane,
+      it,
+    };
   }
 
   draw(items, { sec = 0, totalSec = 0, laneCount = 6 } = {}) {
     const ctx = this.ctx;
     const W = this.cssW;
-    const H = this.cssH;
+    const Hh = this.cssH;
+    this.lanes = laneCount;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.fillStyle = C.bg;
-    ctx.fillRect(0, 0, W, H);
+    ctx.fillRect(0, 0, W, Hh);
 
-    this.lanes = laneCount;
+    const bodyTop = RULER_H;
+    const bodyH = Math.max(0, Hh - RULER_H);
 
-    // ---- 轨道底纹（交替深浅）+ 分隔线 ----
+    // ---- 轨道底纹（交替）+ 分隔线 ----
     for (let lane = 0; lane < this.lanes; lane++) {
       ctx.fillStyle = lane % 2 ? C.laneA : C.laneB;
-      ctx.fillRect(HEADER_W, this.laneY(lane), this.trackW, ROW_H);
+      ctx.fillRect(HEADER_W, this.laneY(lane), W - HEADER_W, this.rowH);
     }
     ctx.strokeStyle = C.laneLine;
     ctx.lineWidth = 1;
     for (let k = 0; k <= this.lanes; k++) {
-      const y = Math.round(RULER_H + k * ROW_H) + 0.5;
+      const y = Math.round(RULER_H + k * this.rowH) + 0.5;
       ctx.beginPath();
       ctx.moveTo(HEADER_W, y);
       ctx.lineTo(W, y);
       ctx.stroke();
     }
 
-    // ---- 秒刻度线（每整秒一条，每 5 秒标数字）----
-    const t0 = Math.max(0, this.xToSec(HEADER_W));
-    const t1 = this.xToSec(W);
+    // ---- ★ 时间线：每 0.5 秒一条细线，整秒一条粗线，5 秒标数字 ★ ----
+    const stepSec = this.pxPerSec >= 140 ? 0.25 : this.pxPerSec >= 60 ? 0.5 : 1;
+    const maxT = Math.max(totalSec, (W - HEADER_W) / this.pxPerSec);
     ctx.font = '11px system-ui, sans-serif';
-    ctx.textBaseline = 'middle';
-    for (let s = Math.floor(t0); s <= Math.ceil(t1); s++) {
-      if (s < 0) continue;
-      const x = Math.round(this.secToX(s)) + 0.5;
+    for (let t = 0; t <= maxT + stepSec; t += stepSec) {
+      const x = Math.round(this.secToX(t)) + 0.5;
       if (x < HEADER_W) continue;
-      ctx.strokeStyle = s % 5 === 0
-        ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.09)';
+      const isWhole = Math.abs(t - Math.round(t)) < 1e-6;
+      const isFive = isWhole && Math.round(t) % 5 === 0;
+      if (isWhole || stepSec >= 1) {
+        ctx.strokeStyle = isFive
+          ? 'rgba(255,255,255,0.20)' : 'rgba(255,255,255,0.11)';
+      } else {
+        ctx.strokeStyle = C.grid;
+      }
       ctx.beginPath();
-      ctx.moveTo(x, RULER_H);
+      ctx.moveTo(x, bodyTop);
       ctx.lineTo(x, this.lanesBottom);
       ctx.stroke();
     }
 
-    // ---- 音符块 ----
+    // ---- 方块（等宽）----
     for (let i = 0; i < items.length; i++) {
       const g = this.geom(items, i);
       if (!g) continue;
-      if (g.x + g.w < HEADER_W || g.x > W) continue;   // 视野外
-      const zone = zoneOf(g.it.chord.pitches);
-      roundRect(ctx, g.x, g.y, g.w, g.h, Math.min(6, g.h * 0.28));
-      ctx.fillStyle = C.zones[zone];
+      if (g.x + NOTE_W < HEADER_W - 20 || g.x > W) continue;
+      roundRect(ctx, g.x, g.y, g.w, g.h, 6);
+      ctx.fillStyle = C.zones[zoneOf(g.it.chord.pitches)];
       ctx.fill();
       if (i === this.sel) {
         ctx.lineWidth = 3;
         ctx.strokeStyle = C.sel;
         ctx.stroke();
       }
-      // 音名（方块够宽才画，不然糊成一团）
       const label = g.it.chord.pitches.join('&');
-      ctx.font = '700 11px system-ui, sans-serif';
-      const tw = ctx.measureText(label).width;
-      if (tw + 8 < g.w) {
+      ctx.font = '700 12px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      if (ctx.measureText(label).width + 6 < g.w) {
         ctx.fillStyle = C.noteText;
-        ctx.textAlign = 'center';
         ctx.fillText(label, g.x + g.w / 2, g.y + g.h / 2 + 0.5);
       }
     }
@@ -182,68 +224,144 @@ export class TimelineEditor {
     ctx.fillRect(HEADER_W, 0, W - HEADER_W, RULER_H);
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    for (let s = Math.floor(t0 / 5) * 5; s <= Math.ceil(t1); s += 5) {
-      if (s < 0) continue;
-      const x = this.secToX(s);
+    ctx.textBaseline = 'middle';
+    const labelStep = niceLabelStep(this.pxPerSec);
+    for (let t = 0; t <= maxT + labelStep; t += labelStep) {
+      const x = this.secToX(t);
       if (x < HEADER_W - 20 || x > W + 20) continue;
+      // 刻度小竖线
+      ctx.strokeStyle = C.rulerLine;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(x) + 0.5, RULER_H - 7);
+      ctx.lineTo(Math.round(x) + 0.5, RULER_H);
+      ctx.stroke();
       ctx.fillStyle = C.rulerText;
-      ctx.fillText(fmtLabel(s), x, RULER_H / 2 + 0.5);
+      ctx.fillText(fmtSec(t), x, RULER_H / 2 - 1);
     }
-    ctx.strokeStyle = C.rulerEdge;
+    ctx.strokeStyle = C.rulerLine;
     ctx.beginPath();
     ctx.moveTo(HEADER_W, RULER_H + 0.5);
     ctx.lineTo(W, RULER_H + 0.5);
     ctx.stroke();
 
     // ---- 播放头（贯穿标尺 + 轨道）----
-    const phx = this.secToX(sec);
-    if (phx >= HEADER_W - 1 && phx <= W + 1) {
-      ctx.strokeStyle = C.playhead;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(Math.round(phx) + 0.5, 0);
-      ctx.lineTo(Math.round(phx) + 0.5, this.lanesBottom);
-      ctx.stroke();
-      // 标尺里那个把手（PR 那种）
-      ctx.fillStyle = C.playhead;
-      ctx.beginPath();
-      ctx.moveTo(phx - 5, 2);
-      ctx.lineTo(phx + 5, 2);
-      ctx.lineTo(phx, 10);
-      ctx.closePath();
-      ctx.fill();
+    if (sec >= 0) {
+      const px = Math.round(this.secToX(sec)) + 0.5;
+      if (px >= HEADER_W - 1) {
+        ctx.strokeStyle = C.playhead;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(px, 0);
+        ctx.lineTo(px, this.lanesBottom);
+        ctx.stroke();
+        ctx.fillStyle = C.playhead;
+        ctx.beginPath();
+        ctx.moveTo(px - 6, 0);
+        ctx.lineTo(px + 6, 0);
+        ctx.lineTo(px, 10);
+        ctx.closePath();
+        ctx.fill();
+      }
     }
 
-    // ---- 左侧轨道头 ----
-    ctx.fillStyle = C.head;
-    ctx.fillRect(0, 0, HEADER_W, H);
-    ctx.font = '600 11px system-ui, sans-serif';
-    ctx.fillStyle = C.headText;
-    ctx.textAlign = 'center';
-    for (let lane = 0; lane < this.lanes; lane++) {
-      const y = this.laneY(lane);
-      // 每条轨道左边一道竖杠（PR 的轨道头一进来先看到的就是它）
-      ctx.fillStyle = 'rgba(70,201,168,0.55)';
-      ctx.fillRect(4, y + 6, 3, ROW_H - 12);
-      ctx.fillStyle = C.headText;
-      ctx.fillText('轨 ' + (this.lanes - lane), HEADER_W / 2 + 3, y + ROW_H / 2);
+    // ---- 左侧轨道头**不在这儿画** ----
+    //   它得固定住，而这张画布是跟着滚的（画上去一滑就跑了）。
+    //   见 `drawHeads()` —— 那是压在滚动层上面的另一张画布。
+
+    // 轨道区以下的部分抹平（视口比轨道高时别留条纹）
+    if (this.lanesBottom < Hh) {
+      ctx.fillStyle = C.bg;
+      ctx.fillRect(0, this.lanesBottom, W, Hh - this.lanesBottom);
     }
-    ctx.strokeStyle = C.headEdge;
-    ctx.beginPath();
-    ctx.moveTo(HEADER_W + 0.5, 0);
-    ctx.lineTo(HEADER_W + 0.5, H);
-    ctx.stroke();
   }
 
-  /** 把视野滚到某个时刻（跟随播放头用）。 */
-  scrollTo(sec) {
-    const x = HEADER_W + sec * this.pxPerSec - this.scrollX;
-    if (x > this.cssW - 60) this.scrollX = sec * this.pxPerSec - (this.cssW - HEADER_W) * 0.35;
-    else if (x < HEADER_W) this.scrollX = Math.max(0, sec * this.pxPerSec - 40);
+  /**
+   * 画左边那条**固定不动**的轨道头。
+   *
+   * ★ 为什么单独一张画布 ★
+   *   第一版把它画在滚动画布的最左边 —— 一滑就跟着跑，白搭。
+   *   现在它压在滚动层上面（CSS `position: absolute`），纹丝不动。
+   *
+   * ★ 显示的是**音名**，不是「轨 N」★
+   *   "轨 4" 对用户没有任何意义，还得去数。这一轨是哪几个键
+   *   （`5 6 7 8`）才是能直接对上游戏里那台琴的东西。
+   *   每行只显示第一个 —— 48px 宽放不下四个。
+   */
+  drawHeads(canvas, viewH) {
+    const dpr = Math.min(3, window.devicePixelRatio || 1);
+    const w = HEADER_W;
+    const key = w + 'x' + viewH + '@' + dpr + '@' + this.lanes
+      + '@' + Math.round(this.rowH);
+    if (key !== this._headKey) {
+      canvas.width = Math.max(1, Math.round(w * dpr));
+      canvas.height = Math.max(1, Math.round(viewH * dpr));
+      canvas.style.width = w + 'px';
+      canvas.style.height = viewH + 'px';
+      this._headKey = key;
+    }
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, viewH);
+
+    ctx.strokeStyle = C.headEdge;
+    ctx.lineWidth = 1;
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // 顶部标尺那一格
+    ctx.fillStyle = C.head;
+    ctx.fillRect(0, 0, w, RULER_H);
+    ctx.beginPath();
+    ctx.moveTo(0, RULER_H + 0.5);
+    ctx.lineTo(w, RULER_H + 0.5);
+    ctx.stroke();
+
+    for (let lane = 0; lane < this.lanes; lane++) {
+      const y = this.laneY(lane);
+      ctx.fillStyle = C.head;
+      ctx.fillRect(0, y, w, this.rowH);
+      // 左边一道竖杠（PR 的 track header 一进来先看到的就是它）
+      ctx.fillStyle = 'rgba(70,201,168,0.6)';
+      ctx.fillRect(5, y + 7, 3, this.rowH - 14);
+      // 这一轨最低那个键的音名
+      const row = 3 - lane;
+      if (row >= 0 && row < PAD_GRID.length) {
+        ctx.fillStyle = C.headText;
+        ctx.fillText(PAD_GRID[row][0], w / 2 + 4, y + this.rowH / 2);
+      }
+    }
+    if (this.lanesBottom < viewH) {
+      ctx.fillStyle = C.head;
+      ctx.fillRect(0, this.lanesBottom, w, viewH - this.lanesBottom);
+    }
+    ctx.beginPath();
+    ctx.moveTo(w - 0.5, 0);
+    ctx.lineTo(w - 0.5, viewH);
+    ctx.stroke();
   }
 }
 
-/** 音高 -> 轨道号（高的在上）。返回 null 表示琴上没这个音。 */
+// ---- 坐标换算的小工具 ----
+
+function niceLabelStep(pxPerSec) {
+  const want = 90;                      // 每个标签大概隔多少像素
+  const cands = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
+  const ideal = want / pxPerSec;
+  for (const c of cands) if (c >= ideal) return c;
+  return 600;
+}
+
+function fmtSec(t) {
+  if (t < 60) {
+    return (Math.abs(t - Math.round(t)) < 1e-6) ? (t + 's') : (t.toFixed(2) + 's');
+  }
+  const m = Math.floor(t / 60);
+  const s = t - m * 60;
+  return m + ':' + String(Math.round(s)).padStart(2, '0');
+}
+
+/** 音高 -> 轨道号（高的在上）。 */
 function laneOf(pitches) {
   let best = null;
   for (const p of pitches) {
@@ -265,13 +383,6 @@ function zoneOf(pitches) {
   return Math.max(0, Math.min(3, z));
 }
 
-function fmtLabel(sec) {
-  if (sec < 60) return sec + 's';
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return m + ':' + String(s).padStart(2, '0');
-}
-
 function roundRect(ctx, x, y, w, h, r) {
   const rr = Math.max(0, Math.min(r, Math.min(w, h) / 2));
   ctx.beginPath();
@@ -282,3 +393,5 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y, x + w, y, rr);
   ctx.closePath();
 }
+
+export { LONG_PRESS_MS, MOVE_TOLERANCE };
