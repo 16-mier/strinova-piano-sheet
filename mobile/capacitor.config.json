@@ -1,0 +1,12 @@
+{
+  "appId": "com.kaqiu.piano",
+  "appName": "卡丘琴谱器",
+  "webDir": "../web",
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#10131b"
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}

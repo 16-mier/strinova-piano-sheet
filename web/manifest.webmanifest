@@ -1,0 +1,22 @@
+{
+  "name": "卡丘琴谱器",
+  "short_name": "琴谱器",
+  "description": "Strinova 钢琴谱 —— 看谱、跟打、可按、训练、制谱",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#10131b",
+  "theme_color": "#10131b",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

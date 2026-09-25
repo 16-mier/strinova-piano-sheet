@@ -49,9 +49,39 @@ assets/notes_game/
 assets/notes_synth/
 *.wav
 !assets/notes/*.wav
+# ★ 手机版那份音源是**复制**过来的，不进仓库 ★
+#   `web/assets/notes/` 和 `assets/notes/` 是同一批 16 个 wav。
+#   提交两份的话迟早会漂移（换了一个音色、只改了其中一边），
+#   而且是 2.4 MB 的纯重复。
+#   由 `mobile/build_apk.ps1` 在构建前拷过去；
+#   想在浏览器里直接开 `web/` 的话，手动跑一次那个拷贝命令就行
+#   （见 `web/README.md`）。
+web/assets/notes/
 
 # ---- 编辑器 / 系统 ----
 .vscode/
 .idea/
 Thumbs.db
 desktop.ini
+
+# ---- 手机版（Capacitor → 安卓 APK）----
+#  ★ 哪些进仓库 ★
+#    `web/`（网页应用本体）、`mobile/package.json`、
+#    `mobile/capacitor.config.json`、`mobile/build_apk.ps1` —— 都要提交，
+#    它们是"源码"。
+#  ★ 哪些不进 ★
+#    `mobile/android/` 是 `cap add android` 生成的（几百个文件），
+#    但 Capacitor 的惯例是**提交它** —— 因为改过的原生配置
+#    （图标、权限、包名）就存在里面，不提交的话下次 `cap add` 会覆盖掉。
+#    所以只忽略它下面的构建产物和自动生成的部分。
+mobile/node_modules/
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/capacitor-cordova-android-plugins/
+# `cap sync` 每次都会把 web/ 原样复制到这里，是**生成物**
+mobile/android/app/src/main/assets/public/
+mobile/android/app/src/main/assets/capacitor.config.json
+mobile/android/local.properties
+*.apk
+*.aab

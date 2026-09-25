@@ -1,0 +1,501 @@
+/* 卡丘琴谱器 手机版 —— 配色沿用桌面版那套（theme.py / appstyle.py），
+   这样两个平台看着是同一个东西。
+
+   深色底 + 青绿强调；格子"深底不动、让轮廓说话"也是照搬桌面版的规矩。 */
+
+:root {
+  --window: #10131b;
+  --panel: #161a24;
+  --panel-hi: #1c2130;
+  --group: #1a1f2c;
+  --input: #0d1017;
+  --edge: #2a3244;
+  --edge-hi: #3a4560;
+
+  --text: #e6ebf5;
+  --text-dim: #96a0b8;
+  --text-mute: #7b8599;
+
+  --accent: #46c9a8;
+  --accent-hi: #5fe0bd;
+  --accent-soft: #173a33;
+  --danger: #ff8a8a;
+
+  /* 格子（对应 theme.py） */
+  --cell: #2e3446;
+  --cell-edge: #626c8c;
+  --active: #606c4a;
+  --active-edge: #baca96;
+  --hit: #46ebbe;
+  --press: #ffd64a;
+
+  --radius-s: 6px;
+  --radius: 10px;
+  --radius-l: 14px;
+  --top: 54px;
+  --bottom: 58px;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overscroll-behavior: none;
+}
+
+body {
+  background: var(--window);
+  color: var(--text);
+  font-family: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+               "Noto Sans CJK SC", system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  display: flex;
+  flex-direction: column;
+  /* 刘海屏安全区 */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* ================= 顶栏 ================= */
+
+.topbar {
+  height: var(--top);
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--edge);
+}
+
+.song-title { flex: 1; min-width: 0; text-align: center; }
+
+.song-name {
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.song-meta {
+  font-size: 11px;
+  color: var(--text-mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-height: 14px;
+}
+
+.icon-btn {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  border: none;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 19px;
+  cursor: pointer;
+}
+.icon-btn:active { background: var(--panel-hi); color: var(--text); }
+
+/* ================= 主区 & 分页 ================= */
+
+#main {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+
+.page {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  padding: 10px;
+  gap: 10px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.page.is-active { display: flex; }
+
+/* ================= 练琴页 ================= */
+
+.stage-wrap {
+  flex: 1 1 auto;
+  min-height: 160px;
+  /* ★ 高度要有个上限 ★
+     网格是**正方形**，边长由较窄的那一边决定（`side = min(宽,高)`）。
+     手机上宽度总是更窄的那个，所以给多高的容器都是白给 ——
+     网格还是那个尺寸，只是上下各留一大片空白，
+     看着就"偏"了（用户的原话：「网格太大或太小，不在屏幕中间」）。
+     限到 62vh 之后，网格大致居中，省下的高度留给下面那条时间轴。 */
+  max-height: 62vh;
+  /* ★ 画布必须**绝对定位** ★
+     第一版让 canvas 当普通 flex item，它会把自己的固有尺寸
+     （就是 `canvas.width` 那个位图像素宽度）反馈给父容器 ——
+     父容器被撑大 → 下一帧量到更大的值 → 格子越画越宽，
+     第四列直接被推出屏幕。绝对定位之后 canvas 不参与布局，
+     量到的永远是父容器真实的可视尺寸。 */
+  position: relative;
+  overflow: hidden;
+}
+.stage-wrap.small { min-height: 140px; }
+
+#stage, #pad-canvas {
+  display: block;
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+}
+
+/* ★ 练琴页底下那条进度时间轴 ★ */
+.strip-wrap {
+  flex: 0 0 auto;
+  height: 62px;
+  position: relative;
+  overflow: hidden;
+}
+#strip {
+  display: block;
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+}
+
+.transport {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--group);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+}
+
+.tbtn {
+  width: 46px;
+  height: 46px;
+  flex: 0 0 auto;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--panel-hi);
+  color: var(--text);
+  font-size: 17px;
+  cursor: pointer;
+}
+.tbtn:active { background: #1a2030; }
+.tbtn.primary {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+
+.prog-wrap { flex: 1 1 auto; min-width: 0; }
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 26px;
+  background: transparent;
+  margin: 0;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 4px;
+  background: var(--input);
+  border: 1px solid var(--edge);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 20px;
+  height: 20px;
+  margin-top: -8px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--window);
+}
+input[type="range"]::-moz-range-track {
+  height: 6px; border-radius: 4px; background: var(--input);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 18px; height: 18px; border: 2px solid var(--window);
+  border-radius: 50%; background: var(--accent);
+}
+
+.time-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+.modes { flex: 0 0 auto; display: flex; gap: 8px; }
+
+.mode {
+  flex: 1 1 0;
+  height: 46px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--panel-hi);
+  color: var(--text-dim);
+  font-size: 14px;
+  cursor: pointer;
+}
+.mode.is-on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+  font-weight: 600;
+}
+
+.hint {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text-mute);
+  line-height: 1.6;
+  padding: 0 2px;
+}
+
+/* ================= 制谱页 ================= */
+
+.edit-tabs { flex: 0 0 auto; display: flex; gap: 6px; }
+
+.etab {
+  flex: 1 1 0;
+  height: 40px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-s);
+  background: var(--panel-hi);
+  color: var(--text-dim);
+  font-size: 14px;
+  cursor: pointer;
+}
+.etab.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+
+.epanel { display: none; flex: 1 1 auto; min-height: 0; flex-direction: column; gap: 10px; }
+.epanel.is-active { display: flex; }
+
+#sheet-text {
+  flex: 1 1 auto;
+  min-height: 180px;
+  width: 100%;
+  padding: 10px;
+  background: var(--input);
+  color: var(--text);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  font-family: "Cascadia Mono", Consolas, "JetBrains Mono", monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  resize: none;
+  outline: none;
+}
+#sheet-text:focus { border-color: var(--accent); }
+
+.row { flex: 0 0 auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.save-row { padding-top: 2px; }
+
+.btn {
+  flex: 1 1 0;
+  min-width: 76px;
+  height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-s);
+  background: var(--panel-hi);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+}
+.btn:active { background: #1a2030; }
+.btn.danger { color: var(--danger); }
+.btn.primary {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.check input { width: 18px; height: 18px; accent-color: var(--accent); }
+
+.tl-wrap {
+  flex: 1 1 auto;
+  min-height: 180px;
+  position: relative;
+  overflow: hidden;
+}
+
+.tl-scroll {
+  position: absolute;
+  inset: 0;
+  /* ★ 横向滚动交给浏览器 ★
+     第一版是自己算 scrollX、自己拦 pointermove —— 手机上不跟手
+     （没有惯性，跟浏览器自己的手势也打架，用户的原话是
+      「没办法拖动时间轴」）。
+     现在画布直接铺成"内容那么宽"，这里只要能滚就行 ——
+     甩动、惯性、边缘回弹全是白送的。 */
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  background: var(--input);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+}
+.tl-scroll::-webkit-scrollbar { height: 6px; }
+.tl-scroll::-webkit-scrollbar-track { background: transparent; }
+.tl-scroll::-webkit-scrollbar-thumb {
+  background: var(--edge-hi);
+  border-radius: 3px;
+}
+#tl-canvas {
+  display: block;
+  /* `pan-x` = 让浏览器处理横向滑动（滚时间轴），
+     而纵向和"长按拖动"由 JS 接管 —— 见 `tledit.js` 里长按那段 */
+  touch-action: pan-x;
+}
+
+/* ★ 轨道头：固定压在最左边，不跟着滚 ★ */
+.tl-heads {
+  position: absolute;
+  left: 1px;              /* 跟 `.tl-scroll` 的边框对齐 */
+  top: 1px;
+  pointer-events: none;   /* 别挡住底下的滑动 */
+  border-top-left-radius: var(--radius);
+}
+
+/* ================= 曲库页 ================= */
+
+.lib-toolbar { flex: 0 0 auto; display: flex; gap: 8px; }
+
+.sheet-list {
+  flex: 1 1 auto;
+  min-height: 120px;
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+  background: var(--input);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+}
+
+.sheet-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 10px;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+.sheet-list li:active { background: var(--panel-hi); }
+.sheet-list li.is-cur { background: var(--accent-soft); }
+.sheet-list li.is-cur .sl-name { color: var(--accent-hi); font-weight: 600; }
+
+.sl-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sl-meta { flex: 0 0 auto; font-size: 11px; color: var(--text-mute); }
+
+.sl-del {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--danger);
+  font-size: 16px;
+  cursor: pointer;
+}
+.sl-del:active { background: rgba(255, 138, 138, 0.14); }
+
+.empty-tip {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--text-mute);
+  font-size: 13px;
+  line-height: 1.8;
+  list-style: none;
+}
+
+/* ================= 底部标签栏 ================= */
+
+.tabbar {
+  height: var(--bottom);
+  flex: 0 0 auto;
+  display: flex;
+  background: var(--panel);
+  border-top: 1px solid var(--edge);
+}
+
+.tab {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-mute);
+  font-size: 11px;
+  cursor: pointer;
+}
+.tab .ti { font-size: 17px; line-height: 1; }
+.tab.is-active { color: var(--accent); }
+
+/* ================= 轻提示 ================= */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--bottom) + 20px);
+  transform: translateX(-50%) translateY(10px);
+  max-width: min(86vw, 420px);
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  background: rgba(28, 33, 48, 0.96);
+  border: 1px solid var(--edge-hi);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s, transform 0.18s;
+  z-index: 50;
+}
+.toast.is-on { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ================= 横屏 ================= */
+
+@media (orientation: landscape) and (max-height: 520px) {
+  :root { --top: 46px; --bottom: 50px; }
+  #page-play { flex-direction: row; flex-wrap: wrap; }
+  .stage-wrap { flex: 1 1 60%; }
+  .transport, .modes { flex: 1 1 100%; }
+  .tbtn { width: 40px; height: 40px; }
+  .mode { height: 40px; }
+}

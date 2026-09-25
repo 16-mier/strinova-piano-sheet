@@ -113,9 +113,16 @@ class KeyPad(QWidget):
         self.player = NotePlayer()
         self._flash: dict[tuple[int, int], int] = {}      # 格子 -> 剩余闪烁帧
         self._press_cell: tuple[int, int] | None = None   # 按下时命中的那一格
+        # ★ 鼠标现在停在哪一格 ★（悬停反馈用）
+        self._hover: tuple[int, int] | None = None
         self.setMinimumSize(260, 260)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # 只认鼠标，不抢焦点
-        self.setMouseTracking(False)
+        # ★ 打开 mouseTracking ★
+        #   原来这里是 `False` —— 不按住键就没有 move 事件，格子**永远
+        #   不知道鼠标在它上面**，于是整个打击垫一点悬停反馈都没有：
+        #   16 个长得一模一样的方块，得靠"点一下试试"才知道点的是哪个。
+        #   打开之后扫过去就能看出"我要点的是这一格"。
+        self.setMouseTracking(True)
         self.setToolTip('点一下出声，松手写进谱面。\n'
                         '（会不会真写进去，看上边那个「同步写入谱面」）')
 
@@ -176,6 +183,26 @@ class KeyPad(QWidget):
         self.update()
 
     # ---- 鼠标 ----
+
+    def mouseMoveEvent(self, event):
+        """鼠标移到哪一格 —— 只为了画一圈淡淡的悬停边。
+
+        ★ 只在"换了格子"时才重绘 ★
+          每来一个 move 事件都 `update()` 的话，鼠标划过整个打击垫会
+          触发几十次重绘；而真正需要重画的只有"跨过格子边界"那几次。
+        """
+        hit = self._hit(event.position())
+        if hit != self._hover:
+            self._hover = hit
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        """鼠标离开打击垫 —— 把悬停边擦掉。"""
+        if self._hover is not None:
+            self._hover = None
+            self.update()
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
@@ -261,9 +288,22 @@ class KeyPad(QWidget):
                 #   一圈亮黄从 1.6px 涨到 6px、从半透明涨到实心，
                 #   8 帧收掉。跟浮窗那边（`GridView._pressure`）一个思路 ——
                 #   **深底不动，让轮廓去表达事件**。
-                lw = 1.6 + 4.4 * (flash / 8.0) if flash > 0 else 1.6
-                edge = (QColor(255, 206, 48, int(160 + 95 * (flash / 8.0)))
-                        if flash > 0 else T.CELL_EDGE)
+                #
+                # ★ 悬停：也只动**边**，不动底色 ★
+                #   跟"按下"用同一套语言（边说话、底不动）。底色一浅就
+                #   撞上用户那句「已经被点过的不需要浅色了」。
+                #   鼠标扫过去时边亮一档、稍粗一点，看得出"要点的就是
+                #   这一格"，而整块依然是深色的。
+                hovered = self._hover == (row, col)
+                if flash > 0:
+                    lw = 1.6 + 4.4 * (flash / 8.0)
+                    edge = QColor(255, 206, 48, int(160 + 95 * (flash / 8.0)))
+                elif hovered:
+                    lw = 2.2
+                    edge = QColor(132, 146, 186, 235)
+                else:
+                    lw = 1.6
+                    edge = T.CELL_EDGE
                 fill = T.CELL
                 txt = T.TEXT
 
